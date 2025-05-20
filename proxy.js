@@ -39,7 +39,7 @@ setInterval(()=>{
 },60000)
 */
 
-const targetUrl = "https://office.buidlguidl.com:48544";
+const targetUrl = "https://stage.rpc.buidlguidl.com:48544";
 
 app.post("/", (req, res) => {
   if (req.headers && req.headers.referer) {
