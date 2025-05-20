@@ -1,5 +1,4 @@
 const https = require("https");
-var httpProxy = require("http-proxy");
 const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
@@ -10,42 +9,22 @@ const ethers = require("ethers");
 https.globalAgent.options.ca = require("ssl-root-cas").create();
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
 
+require('dotenv').config();
+const targetUrl = process.env.TARGET_URL;
+
 const localProviderUrl = "http://localhost:48545";
 app.use(bodyParser.json());
 app.use(cors());
-//app.use(express.json())
-//app.use(express.bodyParser());
-//app.use(bodyParser.json());
-
-var proxy = httpProxy.createProxyServer();
 
 var last = "";
 
 var memcache = {};
 var methods = {};
 var methodsByReferer = {};
-/*
-setInterval(()=>{
-  console.log("--------------------=============------------------")
-  var sortable = [];
-  for (var item in memcache) {
-      sortable.push([item, memcache[item]]);
-  }
-≈  sortable.sort(function(a, b) {
-      return a[1] - b[1];
-  });
-  console.log(sortable)
-  console.log("--------------------=============------------------")
-},60000)
-*/
-
-const targetUrl = "https://stage.rpc.buidlguidl.com:48544";
 
 app.post("/", (req, res) => {
   if (req.headers && req.headers.referer) {
     if (last === req.connection.remoteAddress) {
-      //process.stdout.write(".");
-      //process.stdout.write("-")
     } else {
       last = req.connection.remoteAddress;
       if (!memcache[req.headers.referer]) {
