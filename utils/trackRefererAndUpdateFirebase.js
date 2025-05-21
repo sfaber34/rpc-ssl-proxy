@@ -1,6 +1,7 @@
 const { initializeApp } = require('firebase/app');
 const { getFirestore, doc, getDoc, setDoc } = require('firebase/firestore');
 require('dotenv').config();
+const { updateFirebaseUrlsInt } = require('../config');
 const firebaseCollection = process.env.FIREBASE_COLLECTION;
 
 const firebaseConfig = {
@@ -33,33 +34,37 @@ async function updateFirebase(countMap) {
     if (Object.keys(countMap).length === 0) {
       console.log("countMap is empty");
       return;
-    } 
-    const ref = doc(db, firebaseCollection, 'requestsOutstanding');
-    const docSnap = await getDoc(ref);
-    let firebaseData = {};
-    if (docSnap.exists()) {
-      firebaseData = docSnap.data();
     }
-    // Increment counts
+    // Reference to the urlList document
+    const ref = doc(db, firebaseCollection, 'urlList');
+    const docSnap = await getDoc(ref);
+    let urlListData = {};
+    if (docSnap.exists()) {
+      urlListData = docSnap.data();
+    }
+    // Increment requestsOutstanding only if owner is non-empty
     for (const referer in countMap) {
-      if (firebaseData[referer]) {
-        firebaseData[referer] += countMap[referer];
-      } else {
-        firebaseData[referer] = countMap[referer];
+      if (
+        urlListData[referer] &&
+        urlListData[referer].owner &&
+        urlListData[referer].owner.trim() !== ''
+      ) {
+        urlListData[referer].requestsOutstanding =
+          (urlListData[referer].requestsOutstanding || 0) + countMap[referer];
       }
     }
-    await setDoc(ref, firebaseData);
+    await setDoc(ref, urlListData);
     // Clear countMap
     for (const key in countMap) {
       delete countMap[key];
     }
-    console.log('Firebase updated and countMap cleared.');
+    console.log('urlList updated and countMap cleared.');
   } catch (error) {
-    console.error('Error updating Firebase:', error);
+    console.error('Error updating urlList:', error);
   }
 }
 
 // Call updateFirebase every minute
-setInterval(() => updateFirebase(countMap), 60 * 1000);
+setInterval(() => updateFirebase(countMap), updateFirebaseUrlsInt * 1000);
 
 module.exports = { trackReferersByCount };
