@@ -24,13 +24,18 @@ const publicClient = createPublicClient({
 });
 
 async function getUsdcAllowance(ownerAddress) {
-  const allowance = await publicClient.readContract({
-    address: usdcAddress,
-    abi: usdcAbi,
-    functionName: "allowance",
-    args: [ownerAddress, spender],
-  });
-  return allowance;
+  try {
+    const allowance = await publicClient.readContract({
+      address: usdcAddress,
+      abi: usdcAbi,
+      functionName: "allowance",
+      args: [ownerAddress, spender],
+    });
+    return allowance;
+  } catch (error) {
+    console.error("Error fetching USDC allowance:", error);
+    return null;
+  }
 }
 
 export { getUsdcAllowance };

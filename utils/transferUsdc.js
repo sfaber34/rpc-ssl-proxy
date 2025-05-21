@@ -169,14 +169,18 @@ const contractAbi = [
 ];
 
 async function transferUsdc(addresses, amounts) {
-  const hash = await baseWalletClient.writeContract({
-    address: contractAddress,
-    abi: contractAbi,
-    functionName: "batchTransferUsdcFromUsersToBank",
-    args: [addresses, amounts],
-  });
+  try {
+    const hash = await baseWalletClient.writeContract({
+      address: contractAddress,
+      abi: contractAbi,
+      functionName: "batchTransferUsdcFromUsersToBank",
+      args: [addresses, amounts],
+    });
 
-  console.log("Transaction hash:", hash);
+    console.log("Transaction hash:", hash);
+  } catch (error) {
+    console.error("Error in transferUsdc:", error);
+  }
 }
 
 export { transferUsdc };

@@ -31,7 +31,7 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
     for (const key in urlCountMap) {
       delete urlCountMap[key];
     }
-    console.log('urlList updated and urlCountMap cleared.');
+    console.log('Firebase urlList updated and urlCountMap cleared.');
   } catch (error) {
     console.error('Error updating urlList:', error);
   }
