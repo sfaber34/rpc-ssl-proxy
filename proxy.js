@@ -1,19 +1,21 @@
-const https = require("https");
-const express = require("express");
-const axios = require("axios");
-const fs = require("fs");
-var cors = require("cors");
-var bodyParser = require("body-parser");
+import https from "https";
+import express from "express";
+import axios from "axios";
+import fs from "fs";
+import cors from "cors";
+import bodyParser from "body-parser";
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import ethers from "ethers";
+import sslRootCas from "ssl-root-cas";
+import dotenv from "dotenv";
+import { updateFirebaseWithNewRequests, updateUrlCountMap, urlCountMap } from './utils/updateFirebaseWithNewRequests.js';
 var app = express();
-const ethers = require("ethers");
-https.globalAgent.options.ca = require("ssl-root-cas").create();
+https.globalAgent.options.ca = sslRootCas.create();
+dotenv.config();
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
 
-require('dotenv').config();
 const targetUrl = process.env.TARGET_URL;
-
-// Import the referer tracking function and map
-const { trackReferersByCount } = require("./utils/trackRefererAndUpdateFirebase");
 
 app.use(bodyParser.json());
 app.use(cors());
@@ -26,7 +28,7 @@ var methodsByReferer = {};
 
 app.post("/", (req, res) => {
   if (req.headers && req.headers.referer) {
-    trackReferersByCount(req.headers.referer);
+    updateUrlCountMap(req.headers.referer);
     if (last === req.connection.remoteAddress) {
     } else {
       last = req.connection.remoteAddress;
@@ -175,6 +177,8 @@ app.get("/letathousandscaffoldethsbloom", (req, res) => {
       "</pre></body></html>"
   );
 });
+
+setInterval(() => updateFirebaseWithNewRequests(urlCountMap), 30 * 1000);
 
 https
   .createServer(
