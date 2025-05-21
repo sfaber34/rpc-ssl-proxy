@@ -1,0 +1,52 @@
+import { transferUsdc } from './transferUsdc.js';
+import { getRequestsOutstandingFromFirebase } from './getRequestsOutstandingFromFirebase.js';
+import { clearRequestsOutstandingFromFirebase } from './clearRequestsOutstandingFromFirebase.js';
+import { getUsdcAllowance } from './getUsdcAllowance.js';
+
+async function batchTransferUsdcForRequests() {
+  try {
+    const requestsOutstanding = await getRequestsOutstandingFromFirebase();
+    console.log("Requests outstanding:", requestsOutstanding);
+
+    // Aggregate requestsOutstanding by owner
+    const ownerRequestCounts = {};
+    for (const [site, data] of Object.entries(requestsOutstanding)) {
+      if (data.owner && typeof data.requestsOutstanding === 'number') {
+        if (!ownerRequestCounts[data.owner]) {
+          ownerRequestCounts[data.owner] = 0;
+        }
+        ownerRequestCounts[data.owner] += data.requestsOutstanding;
+      }
+    }
+
+    // Prepare arrays for owners and amounts to transfer
+    const ownersToTransfer = [];
+    const amountsToTransfer = [];
+
+    // For each owner, get and log their USDC allowance
+    for (const [owner, count] of Object.entries(ownerRequestCounts)) {
+      const allowance = await getUsdcAllowance(owner);
+      console.log(`Owner: ${owner}, Requests Outstanding: ${count}, USDC Allowance: ${allowance}`);
+      if (allowance >= count) {
+        console.log(`Will transfer ${count / 1000000} USDC from owner ${owner}`);
+        ownersToTransfer.push(owner);
+        amountsToTransfer.push(count);
+      } else {
+        console.log(`Owner ${owner} does not have enough allowance for ${count} transfers (allowance: ${allowance})`);
+      }
+    }
+
+    // Call transferUsdc if there are any eligible owners
+    if (ownersToTransfer.length > 0) {
+      console.log(`Initiated transfer for owners:`, ownersToTransfer);
+      await transferUsdc(ownersToTransfer, amountsToTransfer);
+      await clearRequestsOutstandingFromFirebase(ownersToTransfer);
+    } else {
+      console.log('No owners eligible for transfer.');
+    }
+  } catch (error) {
+    console.error('Error in batchTransferUsdcForRequests:', error);
+  }
+}
+
+export { batchTransferUsdcForRequests };

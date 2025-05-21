@@ -10,6 +10,7 @@ import ethers from "ethers";
 import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
 import { updateFirebaseWithNewRequests } from './utils/updateFirebaseWithNewRequests.js';
+import { batchTransferUsdcForRequests } from './utils/batchTransferUsdcForRequests.js';
 import { updateUrlCountMap } from './utils/updateUrlCountMap.js';
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -210,7 +211,10 @@ app.get("/letathousandscaffoldethsbloom", (req, res) => {
   }
 });
 
-setInterval(() => updateFirebaseWithNewRequests(urlCountMap), 30 * 1000);
+setInterval(() => {
+  updateFirebaseWithNewRequests(urlCountMap);
+  setTimeout(batchTransferUsdcForRequests, 5 * 1000);
+}, 30 * 1000);
 
 let key, cert;
 try {

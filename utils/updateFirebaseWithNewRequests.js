@@ -17,8 +17,16 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
     }
     // Increment requestsOutstanding only if owner is non-empty
     for (const referer in urlCountMap) {
+      // If the URL is not present, add it with default values
+      if (!urlListData[referer]) {
+        urlListData[referer] = {
+          owner: "",
+          requestsOutstanding: 0,
+          // add other default fields if needed
+        };
+      }
+      // Only increment if owner is non-empty
       if (
-        urlListData[referer] &&
         urlListData[referer].owner &&
         urlListData[referer].owner.trim() !== ''
       ) {
