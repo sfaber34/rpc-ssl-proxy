@@ -12,7 +12,9 @@ process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
 require('dotenv').config();
 const targetUrl = process.env.TARGET_URL;
 
-const localProviderUrl = "http://localhost:48545";
+// Import the referer tracking function and map
+const { trackReferersByCount } = require("./utils/trackRefererAndUpdateFirebase");
+
 app.use(bodyParser.json());
 app.use(cors());
 
@@ -24,6 +26,7 @@ var methodsByReferer = {};
 
 app.post("/", (req, res) => {
   if (req.headers && req.headers.referer) {
+    trackReferersByCount(req.headers.referer);
     if (last === req.connection.remoteAddress) {
     } else {
       last = req.connection.remoteAddress;
@@ -65,8 +68,25 @@ app.post("/", (req, res) => {
       },
     })
     .then((response) => {
-      console.log("POST RESPONSE", response.data);
-      res.status(response.status).send(response.data);
+      // Strip any leading non-JSON characters from the response before sending
+      let dataToSend = response.data;
+      if (Buffer.isBuffer(dataToSend)) {
+        dataToSend = dataToSend.toString('utf8');
+      }
+      if (typeof dataToSend === 'string') {
+        const firstBrace = dataToSend.indexOf('{');
+        if (firstBrace !== -1) {
+          dataToSend = dataToSend.slice(firstBrace);
+        }
+        try {
+          dataToSend = JSON.parse(dataToSend);
+        } catch (e) {
+          console.error('Could not parse cleaned response as JSON:', dataToSend);
+          return res.status(500).json({ error: 'Upstream response was not valid JSON.' });
+        }
+      }
+      console.log("POST RESPONSE", dataToSend);
+      res.status(response.status).json(dataToSend);
     })
     .catch((error) => {
       console.log("POST ERROR", error);
@@ -79,7 +99,7 @@ app.post("/", (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  console.log("GET", req.headers.referer);
+  console.log("GET", req.headers.referer || "no referer");
   axios
     .get(targetUrl, {
       headers: {
@@ -154,70 +174,6 @@ app.get("/letathousandscaffoldethsbloom", (req, res) => {
       finalBody +
       "</pre></body></html>"
   );
-});
-
-app.get("/sync", (req, res) => {
-  //if(req.headers&&req.headers.referer&&req.headers.referer.indexOf("sandbox.eth.build")>=0){
-  console.log(" 🏷 sync ");
-
-  let localProvider = new ethers.providers.JsonRpcProvider(localProviderUrl);
-
-  localProvider.send("eth_syncing").then(
-    (a, b) => {
-      console.log("DONE", a, b, a.currentBlock);
-      if (a === "false") {
-        let currentBlock = ethers.BigNumber.from("" + a.currentBlock);
-        console.log("currentBlock", currentBlock);
-        res.send(
-          "<html><body><div style='padding:20px;font-size:18px'><H1>SYNCING</H1></div><pre>" +
-            JSON.stringify(a) +
-            "</pre><div>currentBlock</div><b>" +
-            currentBlock.toNumber() +
-            "</b></body></html>"
-        );
-      } else {
-        res.send(
-          "<html><body><div style='padding:20px;font-size:18px'><H1 style=\"color:green;\">IN SYNC!</H1></div><pre></pre></body></html>"
-        );
-      }
-    },
-    (a, b) => {
-      console.log("REJECT", a, b);
-      res.send(
-        "<html><body><div style='padding:20px;font-size:18px'><H1>SYNC REJECT</H1></div><pre></pre></body></html>"
-      );
-    }
-  );
-
-  //JSON.stringify(sortable)
-});
-
-app.get("/block", (req, res) => {
-  //if(req.headers&&req.headers.referer&&req.headers.referer.indexOf("sandbox.eth.build")>=0){
-  console.log(" 🛰 block ");
-
-  let localProvider = new ethers.providers.JsonRpcProvider(localProviderUrl);
-
-  localProvider.getBlockNumber().then(
-    (a, b) => {
-      console.log("DONE", a, b);
-      res.send(
-        "<html><body><div style='padding:20px;font-size:18px'><H1>BLOCK</H1></div><pre>" +
-          a +
-          "</pre></body></html>"
-      );
-    },
-    (a, b) => {
-      console.log("REJECT", a, b);
-      res.send(
-        "<html><body><div style='padding:20px;font-size:18px'><H1>BLOCK REJECT</H1></div><pre>" +
-          a +
-          "</pre></body></html>"
-      );
-    }
-  );
-
-  //JSON.stringify(sortable)
 });
 
 https
