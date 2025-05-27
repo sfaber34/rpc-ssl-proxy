@@ -1,6 +1,5 @@
-const updateFirebaseUrlsInt = 30; //seconds
+const backgroundTasksInterval = 10; //seconds
 
-
-module.exports = {
-  updateFirebaseUrlsInt,
+export {
+  backgroundTasksInterval
 };

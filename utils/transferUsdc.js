@@ -10,15 +10,6 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
-const key = process.env.RPC_INTERFACE_KEY;
-const account = privateKeyToAccount(key);
-
-const baseWalletClient = createWalletClient({
-  account,
-  chain: base, // or your target chain
-  transport: http(),
-});
-
 const contractAddress = "0x291469065a4DDdE2CA9f6A53ab4Aa148B8e42f48";
 const contractAbi = [
   {
@@ -170,6 +161,19 @@ const contractAbi = [
 
 async function transferUsdc(addresses, amounts) {
   try {
+    const key = process.env.RPC_INTERFACE_KEY;
+    if (!key) {
+      console.error("No private key found in environment variables");
+      return;
+    }
+
+    const account = privateKeyToAccount(key);
+    const baseWalletClient = createWalletClient({
+      account,
+      chain: base,
+      transport: http(),
+    });
+
     const hash = await baseWalletClient.writeContract({
       address: contractAddress,
       abi: contractAbi,

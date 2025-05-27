@@ -8,16 +8,14 @@ import { fileURLToPath } from 'url';
 import ethers from "ethers";
 import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
-import { updateFirebaseWithNewRequests } from './utils/updateFirebaseWithNewRequests.js';
-import { batchTransferUsdcForRequests } from './utils/batchTransferUsdcForRequests.js';
-import { updateUrlCountMap } from './utils/updateUrlCountMap.js';
+import { updateUrlCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
+
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
 dotenv.config();
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
 
 const targetUrl = process.env.TARGET_URL;
-const urlCountMap = {};
 
 app.use(bodyParser.json());
 app.use(cors());
@@ -30,7 +28,7 @@ var methodsByReferer = {};
 
 app.post("/", (req, res) => {
   if (req.headers && req.headers.referer) {
-    updateUrlCountMap(req.headers.referer, urlCountMap);
+    updateUrlCountMap(req.headers.referer);
     if (last === req.connection.remoteAddress) {
       //process.stdout.write(".");
       //process.stdout.write("-")
@@ -190,10 +188,8 @@ app.get("/letathousandscaffoldethsbloom", (req, res) => {
   }
 });
 
-setInterval(() => {
-  updateFirebaseWithNewRequests(urlCountMap);
-  setTimeout(batchTransferUsdcForRequests, 5 * 1000);
-}, 30 * 1000);
+// Start background tasks
+startBackgroundTasks();
 
 let key, cert;
 try {

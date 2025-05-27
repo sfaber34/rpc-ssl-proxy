@@ -25,28 +25,38 @@ async function batchTransferUsdcForRequests() {
 
     // For each owner, get and log their USDC allowance
     for (const [owner, count] of Object.entries(ownerRequestCounts)) {
-      const allowance = await getUsdcAllowance(owner);
-      console.log(`Owner: ${owner}, Requests Outstanding: ${count}, USDC Allowance: ${allowance}`);
-      if (allowance >= count) {
-        console.log(`Will transfer ${count / 1000000} USDC from owner ${owner}`);
-        ownersToTransfer.push(owner);
-        amountsToTransfer.push(count);
-      } else {
-        console.log(`Owner ${owner} does not have enough allowance for ${count} transfers (allowance: ${allowance})`);
+      try {
+        const allowance = await getUsdcAllowance(owner);
+        console.log(`Owner: ${owner}, Requests Outstanding: ${count}, USDC Allowance: ${allowance}`);
+        if (allowance >= count) {
+          console.log(`Will transfer ${count / 1000000} USDC from owner ${owner}`);
+          ownersToTransfer.push(owner);
+          amountsToTransfer.push(count);
+        } else {
+          console.log(`Owner ${owner} does not have enough allowance for ${count} transfers (allowance: ${allowance})`);
+        }
+      } catch (error) {
+        console.error(`Error processing owner ${owner}:`, error);
+        continue; // Skip this owner and continue with others
       }
     }
 
     // Call transferUsdc if there are any eligible owners
     if (ownersToTransfer.length > 0) {
-      console.log(`Initiated transfer for owners:`, ownersToTransfer);
-      await transferUsdc(ownersToTransfer, amountsToTransfer);
-      await clearRequestsOutstandingFromFirebase(ownersToTransfer);
+      try {
+        console.log(`Initiated transfer for owners:`, ownersToTransfer);
+        await transferUsdc(ownersToTransfer, amountsToTransfer);
+        await clearRequestsOutstandingFromFirebase(ownersToTransfer);
+      } catch (error) {
+        console.error('Error during transfer or clearing:', error);
+      }
     } else {
       console.log('No owners eligible for transfer.');
     }
   } catch (error) {
     console.error('Error in batchTransferUsdcForRequests:', error);
   }
+  return; // Explicitly return undefined to prevent any error propagation
 }
 
 export { batchTransferUsdcForRequests };

@@ -32,6 +32,7 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
       ) {
         urlListData[referer].requestsOutstanding =
           (urlListData[referer].requestsOutstanding || 0) + urlCountMap[referer];
+        console.log(`Updating Firebase for ${referer}: +${urlCountMap[referer]} requests (total: ${urlListData[referer].requestsOutstanding})`);
       }
     }
     await setDoc(ref, urlListData);
