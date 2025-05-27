@@ -5,7 +5,6 @@ import fs from "fs";
 import cors from "cors";
 import bodyParser from "body-parser";
 import { fileURLToPath } from 'url';
-import { dirname } from 'path';
 import ethers from "ethers";
 import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
