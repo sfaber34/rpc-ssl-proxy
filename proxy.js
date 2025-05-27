@@ -30,82 +30,62 @@ var methods = {};
 var methodsByReferer = {};
 
 app.post("/", (req, res) => {
-  try {
-    if (req.headers && req.headers.referer) {
-      updateUrlCountMap(req.headers.referer, urlCountMap);
-      if (last === req.connection.remoteAddress) {
+  if (req.headers && req.headers.referer) {
+    updateUrlCountMap(req.headers.referer, urlCountMap);
+    if (last === req.connection.remoteAddress) {
+      //process.stdout.write(".");
+      //process.stdout.write("-")
+    } else {
+      last = req.connection.remoteAddress;
+      if (!memcache[req.headers.referer]) {
+        memcache[req.headers.referer] = 1;
+        process.stdout.write(
+          "NEW SITE " +
+            req.headers.referer +
+            " --> " +
+            req.connection.remoteAddress
+        );
+        process.stdout.write("🪐 " + req.connection.remoteAddress);
       } else {
-        last = req.connection.remoteAddress;
-        if (!memcache[req.headers.referer]) {
-          memcache[req.headers.referer] = 1;
-          process.stdout.write(
-            "NEW SITE " +
-              req.headers.referer +
-              " --> " +
-              req.connection.remoteAddress
-          );
-          process.stdout.write("🪐 " + req.connection.remoteAddress);
-        } else {
-          memcache[req.headers.referer]++;
-        }
+        memcache[req.headers.referer]++;
       }
     }
-
-    if (req.body && req.body.method) {
-      methods[req.body.method] = methods[req.body.method]
-        ? methods[req.body.method] + 1
-        : 1;
-      console.log("--> METHOD", req.body.method, "REFERER", req.headers.referer);
-
-      if (!methodsByReferer[req.headers.referer]) {
-        methodsByReferer[req.headers.referer] = {};
-      }
-
-      methodsByReferer[req.headers.referer] &&
-      methodsByReferer[req.headers.referer][req.body.method]
-        ? methodsByReferer[req.headers.referer][req.body.method]++
-        : (methodsByReferer[req.headers.referer][req.body.method] = 1);
-    }
-    axios
-      .post(targetUrl, req.body, {
-        headers: {
-          "Content-Type": "application/json",
-          ...req.headers,
-        },
-      })
-      .then((response) => {
-        // Strip any leading non-JSON characters from the response before sending
-        let dataToSend = response.data;
-        if (Buffer.isBuffer(dataToSend)) {
-          dataToSend = dataToSend.toString('utf8');
-        }
-        if (typeof dataToSend === 'string') {
-          const firstBrace = dataToSend.indexOf('{');
-          if (firstBrace !== -1) {
-            dataToSend = dataToSend.slice(firstBrace);
-          }
-          try {
-            dataToSend = JSON.parse(dataToSend);
-          } catch (e) {
-            console.error('Could not parse cleaned response as JSON:', dataToSend);
-            return res.status(500).json({ error: 'Upstream response was not valid JSON.' });
-          }
-        }
-        console.log("POST RESPONSE", dataToSend);
-        res.status(response.status).json(dataToSend);
-      })
-      .catch((error) => {
-        console.log("POST ERROR", error);
-        res
-          .status(error.response ? error.response.status : 500)
-          .send(error.message);
-      });
-
-    console.log("POST SERVED", req.body);
-  } catch (err) {
-    console.error("POST / error:", err);
-    res.status(500).json({ error: "Internal server error" });
   }
+
+  if (req.body && req.body.method) {
+    methods[req.body.method] = methods[req.body.method]
+      ? methods[req.body.method] + 1
+      : 1;
+    console.log("--> METHOD", req.body.method, "REFERER", req.headers.referer);
+
+    if (!methodsByReferer[req.headers.referer]) {
+      methodsByReferer[req.headers.referer] = {};
+    }
+
+    methodsByReferer[req.headers.referer] &&
+    methodsByReferer[req.headers.referer][req.body.method]
+      ? methodsByReferer[req.headers.referer][req.body.method]++
+      : (methodsByReferer[req.headers.referer][req.body.method] = 1);
+  }
+  axios
+    .post(targetUrl, req.body, {
+      headers: {
+        "Content-Type": "application/json",
+        ...req.headers,
+      },
+    })
+    .then((response) => {
+      console.log("POST RESPONSE", response.data);
+      res.status(response.status).send(response.data);
+    })
+    .catch((error) => {
+      console.log("POST ERROR", error);
+      res
+        .status(error.response ? error.response.status : 500)
+        .send(error.message);
+    });
+
+  console.log("POST SERVED", req.body);
 });
 
 app.get("/", (req, res) => {
