@@ -1,8 +1,6 @@
 import { createPublicClient, http } from "viem";
 import { base } from "viem/chains";
-
-const usdcAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const spender = "0x291469065a4DDdE2CA9f6A53ab4Aa148B8e42f48";
+import { usdcAddress, rpcFunderContractAddress } from '../config.js';
 
 // Minimal ABI for allowance
 const usdcAbi = [
@@ -29,7 +27,7 @@ async function getUsdcAllowance(ownerAddress) {
       address: usdcAddress,
       abi: usdcAbi,
       functionName: "allowance",
-      args: [ownerAddress, spender],
+      args: [ownerAddress, rpcFunderContractAddress],
     });
     return allowance;
   } catch (error) {

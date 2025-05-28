@@ -4,13 +4,13 @@ import { base } from "viem/chains";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { rpcFunderContractAddress } from '../config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
-const contractAddress = "0x291469065a4DDdE2CA9f6A53ab4Aa148B8e42f48";
 const contractAbi = [
   {
     inputs: [
@@ -175,7 +175,7 @@ async function transferUsdc(addresses, amounts) {
     });
 
     const hash = await baseWalletClient.writeContract({
-      address: contractAddress,
+      address: rpcFunderContractAddress,
       abi: contractAbi,
       functionName: "batchTransferUsdcFromUsersToBank",
       args: [addresses, amounts],
