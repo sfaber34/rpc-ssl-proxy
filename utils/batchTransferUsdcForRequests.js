@@ -2,6 +2,7 @@ import { transferUsdc } from './transferUsdc.js';
 import { getRequestsOutstandingFromFirebase } from './getRequestsOutstandingFromFirebase.js';
 import { clearRequestsOutstandingFromFirebase } from './clearRequestsOutstandingFromFirebase.js';
 import { getUsdcAllowance } from './getUsdcAllowance.js';
+import { updateFirebaseWithUserRequestCount } from './updateFirebaseWithUserRequestCount.js';
 
 async function batchTransferUsdcForRequests() {
   try {
@@ -22,6 +23,7 @@ async function batchTransferUsdcForRequests() {
     // Prepare arrays for owners and amounts to transfer
     const ownersToTransfer = [];
     const amountsToTransfer = [];
+    const successfulOwnerCounts = {};
 
     // For each owner, get and log their USDC allowance
     for (const [owner, count] of Object.entries(ownerRequestCounts)) {
@@ -32,6 +34,7 @@ async function batchTransferUsdcForRequests() {
           console.log(`Will transfer ${count / 1000000} USDC from owner ${owner}`);
           ownersToTransfer.push(owner);
           amountsToTransfer.push(count);
+          successfulOwnerCounts[owner] = count;
         } else {
           console.log(`Owner ${owner} does not have enough allowance for ${count} transfers (allowance: ${allowance})`);
         }
@@ -47,6 +50,8 @@ async function batchTransferUsdcForRequests() {
         console.log(`Initiated transfer for owners:`, ownersToTransfer);
         await transferUsdc(ownersToTransfer, amountsToTransfer);
         await clearRequestsOutstandingFromFirebase(ownersToTransfer);
+        // Update the total request counts in Firebase for successful transfers
+        await updateFirebaseWithUserRequestCount(successfulOwnerCounts);
       } catch (error) {
         console.error('Error during transfer or clearing:', error);
       }
