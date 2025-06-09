@@ -19,8 +19,17 @@ const firebaseConfig = {
   measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
 };
 
-// Prevent multiple initializations
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-const db = getFirestore(app);
+let app;
+let db;
+
+try {
+  // Prevent multiple initializations
+  app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+  db = getFirestore(app);
+} catch (error) {
+  console.error('Error initializing Firebase:', error);
+  // Re-throw the error since Firebase initialization is critical
+  throw error;
+}
 
 export { app, db }; 
