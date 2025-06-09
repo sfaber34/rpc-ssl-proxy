@@ -1,5 +1,5 @@
 import { updateFirebaseWithNewRequests } from './updateFirebaseWithNewRequests.js';
-import { batchTransferUsdcForRequests } from './batchTransferUsdcForRequests.js';
+import { transferFirebaseRequestsToFunded } from './transferFirebaseRequestsToFunded.js';
 import { backgroundTasksInterval } from '../config.js';
 
 // Shared state object
@@ -56,7 +56,7 @@ async function processBackgroundTasks() {
     // Every 10th update, process transfers
     if (state.updateCounter >= 10) {
       console.log('Running transfers after Firebase update...');
-      await batchTransferUsdcForRequests();
+      await transferFirebaseRequestsToFunded();
       state.updateCounter = 0;
     }
   } catch (error) {

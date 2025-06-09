@@ -1,6 +1,6 @@
 import { db } from './firebaseClient.js';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-const firebaseCollection = 'stage';
+const firebaseCollection = process.env.FIREBASE_COLLECTION;
 
 async function updateFirebaseWithUserRequestCount(ownerRequestCounts) {
   try {
