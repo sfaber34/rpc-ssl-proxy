@@ -11,7 +11,7 @@ const state = {
 
 // Function to strip protocol from URL
 function stripProtocol(url) {
-  return url.replace(/^https?:\/\//, '');
+  return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
 // Function to safely update the urlCountMap
