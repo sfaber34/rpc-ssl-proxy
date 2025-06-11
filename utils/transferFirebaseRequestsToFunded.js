@@ -10,52 +10,54 @@ async function transferFirebaseRequestsToFunded() {
     const requestsOutstanding = await getRequestsOutstandingFromFirebase();
     console.log("Requests outstanding:", requestsOutstanding);
 
-    // Aggregate requestsOutstanding by owner
-    const ownerRequestCounts = {};
-    for (const [site, data] of Object.entries(requestsOutstanding)) {
-      if (data.owner && typeof data.requestsOutstanding === 'number') {
-        if (!ownerRequestCounts[data.owner]) {
-          ownerRequestCounts[data.owner] = 0;
-        }
-        ownerRequestCounts[data.owner] += data.requestsOutstanding;
-      }
-    }
+    // Get the urlList document
+    const urlListRef = doc(db, firebaseCollection, 'urlList');
+    const urlListSnap = await getDoc(urlListRef);
+    let urlListData = urlListSnap.exists() ? urlListSnap.data() : {};
 
-    // Get the userRequestCount document
-    const userRequestCountRef = doc(db, firebaseCollection, 'userRequestCount');
-    const userRequestCountSnap = await getDoc(userRequestCountRef);
-    let userRequestData = userRequestCountSnap.exists() ? userRequestCountSnap.data() : {};
+    // Get the requestCount document for totalFundedRequests
+    const requestCountRef = doc(db, firebaseCollection, 'requestCount');
+    const requestCountSnap = await getDoc(requestCountRef);
+    let requestCountData = requestCountSnap.exists() ? requestCountSnap.data() : { totalFundedRequests: 0 };
 
-    // Update the request counts for each owner
-    for (const [owner, count] of Object.entries(ownerRequestCounts)) {
-      if (!userRequestData[owner]) {
-        userRequestData[owner] = {
+    let totalNewlyFunded = 0;
+
+    // Process each URL's outstanding requests
+    for (const [url, data] of Object.entries(requestsOutstanding)) {
+      if (typeof data.requestsOutstanding === 'number' && data.requestsOutstanding > 0) {
+        // Get the current state of the URL
+        const currentData = urlListData[url] || {
           requestsRemaining: 0,
-          requestsFunded: 0,
-          lastUpdated: new Date().toISOString()
+          requestsOutstanding: 0
         };
+
+        // Calculate how many requests we can actually fund
+        const requestsToFund = Math.min(
+          currentData.requestsRemaining || 0,
+          data.requestsOutstanding
+        );
+
+        // Update the URL's data
+        urlListData[url] = {
+          requestsRemaining: Math.max(0, (currentData.requestsRemaining || 0) - requestsToFund),
+          // If we couldn't fund all outstanding requests, keep the remainder
+          requestsOutstanding: data.requestsOutstanding - requestsToFund
+        };
+
+        totalNewlyFunded += requestsToFund;
+        console.log(`Processed ${url}: Funded ${requestsToFund} requests (${data.requestsOutstanding - requestsToFund} requests still outstanding)`);
       }
-
-      // Move requests from remaining to funded
-      userRequestData[owner].requestsRemaining = Math.max(0, (userRequestData[owner].requestsRemaining || 0) - count);
-      userRequestData[owner].requestsFunded = (userRequestData[owner].requestsFunded || 0) + count;
-      userRequestData[owner].lastUpdated = new Date().toISOString();
-
-      console.log(`Updated ${owner}: Moved ${count} requests from remaining to funded`);
     }
 
-    // Save the updated userRequestCount document
-    await setDoc(userRequestCountRef, userRequestData);
-    console.log('Successfully updated userRequestCount in Firebase');
+    // Update the global totalFundedRequests counter
+    requestCountData.totalFundedRequests = (requestCountData.totalFundedRequests || 0) + totalNewlyFunded;
+    console.log(`Total newly funded requests: ${totalNewlyFunded}`);
 
-    // Clear the outstanding requests from urlList
-    const ownersToClear = Object.keys(ownerRequestCounts);
-    if (ownersToClear.length > 0) {
-      await clearRequestsOutstandingFromFirebase(ownersToClear);
-      console.log('Cleared outstanding requests from urlList');
-    } else {
-      console.log('No owners to clear from urlList');
-    }
+    // Save both documents
+    await setDoc(urlListRef, urlListData);
+    await setDoc(requestCountRef, requestCountData);
+    
+    console.log('Successfully updated urlList and requestCount in Firebase');
 
   } catch (error) {
     console.error('Error in transferFirebaseRequestsToFunded:', error);

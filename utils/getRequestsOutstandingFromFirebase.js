@@ -9,15 +9,14 @@ async function getRequestsOutstandingFromFirebase() {
     const docSnap = await getDoc(ref);
     const data = docSnap.data();
     if (!data) return {};
-    // Filter for requestsOutstanding > 0 and owner set
+
+    // Filter for requestsOutstanding > 0
     const filtered = {};
     for (const [key, value] of Object.entries(data)) {
       if (
         value &&
         typeof value.requestsOutstanding === 'number' &&
-        value.requestsOutstanding > 0 &&
-        value.owner &&
-        value.owner.trim() !== ''
+        value.requestsOutstanding > 0
       ) {
         filtered[key] = value;
       }

@@ -3,24 +3,24 @@ import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 const firebaseCollection = process.env.FIREBASE_COLLECTION;
 
-// Accepts an array of user addresses
-async function clearRequestsOutstandingFromFirebase(users) {
+// Accepts an array of URLs
+async function clearRequestsOutstandingFromFirebase(urls) {
   try {
-    if (!Array.isArray(users) || users.length === 0) return {};
+    if (!Array.isArray(urls) || urls.length === 0) return {};
+
     const ref = doc(db, firebaseCollection, 'urlList');
     const docSnap = await getDoc(ref);
     const data = docSnap.data();
     if (!data) return {};
+
     let updated = false;
-    // Lowercase all user addresses for case-insensitive match
-    const userSet = new Set(users.map(u => u.toLowerCase()));
+    const urlSet = new Set(urls);
+
     for (const [key, value] of Object.entries(data)) {
       if (
         value &&
         typeof value.requestsOutstanding === 'number' &&
-        value.owner &&
-        value.owner.trim() !== '' &&
-        userSet.has(value.owner.toLowerCase())
+        urlSet.has(key)
       ) {
         if (value.requestsOutstanding !== 0) {
           data[key].requestsOutstanding = 0;
@@ -28,6 +28,7 @@ async function clearRequestsOutstandingFromFirebase(users) {
         }
       }
     }
+
     if (updated) {
       await setDoc(ref, data);
     }

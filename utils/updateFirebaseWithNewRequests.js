@@ -8,34 +8,31 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
       console.log("urlCountMap is empty");
       return;
     }
+
     // Reference to the urlList document
     const ref = doc(db, firebaseCollection, 'urlList');
     const docSnap = await getDoc(ref);
-    let urlListData = {};
-    if (docSnap.exists()) {
-      urlListData = docSnap.data();
-    }
-    // Increment requestsOutstanding only if owner is non-empty
+    let urlListData = docSnap.exists() ? docSnap.data() : {};
+
+    // Update requestsOutstanding for each URL
     for (const referer in urlCountMap) {
       // If the URL is not present, add it with default values
       if (!urlListData[referer]) {
         urlListData[referer] = {
-          owner: "",
-          requestsOutstanding: 0,
-          // add other default fields if needed
+          requestsRemaining: 0,
+          requestsOutstanding: 0
         };
       }
-      // Only increment if owner is non-empty
-      if (
-        urlListData[referer].owner &&
-        urlListData[referer].owner.trim() !== ''
-      ) {
-        urlListData[referer].requestsOutstanding =
-          (urlListData[referer].requestsOutstanding || 0) + urlCountMap[referer];
-        console.log(`Updating Firebase for ${referer}: +${urlCountMap[referer]} requests (total: ${urlListData[referer].requestsOutstanding})`);
-      }
+
+      const newRequests = urlCountMap[referer];
+      urlListData[referer].requestsOutstanding = 
+        (urlListData[referer].requestsOutstanding || 0) + newRequests;
+      
+      console.log(`Updating Firebase for ${referer}: +${newRequests} requests (total outstanding: ${urlListData[referer].requestsOutstanding}, remaining: ${urlListData[referer].requestsRemaining})`);
     }
+
     await setDoc(ref, urlListData);
+    
     // Clear urlCountMap
     for (const key in urlCountMap) {
       delete urlCountMap[key];
