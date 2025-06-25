@@ -188,6 +188,15 @@ app.get("/letathousandscaffoldethsbloom", (req, res) => {
   }
 });
 
+app.get("/watchdog", (req, res) => {
+  try {
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("/watchdog error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Start background tasks
 startBackgroundTasks();
 
