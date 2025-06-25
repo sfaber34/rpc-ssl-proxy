@@ -1,5 +1,6 @@
 #/bin/bash
-sudo certbot certonly --standalone -d stage.mainnet.rpc.buidlguidl.com --config-dir ~/.certbot/config --logs-dir ~/.certbot/logs --work-dir ~/.certbot/work
+# sudo certbot certonly --standalone -d stage.mainnet.rpc.buidlguidl.com --config-dir ~/.certbot/config --logs-dir ~/.certbot/logs --work-dir ~/.certbot/work
+sudo certbot renew --force-renewal --cert-name stage.mainnet.rpc.buidlguidl.com --config-dir ~/.certbot/config --logs-dir ~/.certbot/logs --work-dir ~/.certbot/work -n
 
 #if you run it without the dirs, it will be in /etc/letsencrypt/live/rpc.eth.build
 
