@@ -1,30 +1,34 @@
 import { db } from './firebaseClient.js';
-import { doc, getDoc } from 'firebase/firestore';
 
 const firebaseCollection = process.env.FIREBASE_COLLECTION;
 
 async function getRequestsOutstandingFromFirebase() {
   try {
-    const ref = doc(db, firebaseCollection, 'urlList');
-    const docSnap = await getDoc(ref);
-    const data = docSnap.data();
-    if (!data) return {};
+    const ref = db.collection(firebaseCollection).doc('urlList');
+    const docSnap = await ref.get();
 
-    // Filter for requestsOutstanding > 0
-    const filtered = {};
-    for (const [key, value] of Object.entries(data)) {
-      if (
-        value &&
-        typeof value.requestsOutstanding === 'number' &&
-        value.requestsOutstanding > 0
-      ) {
-        filtered[key] = value;
+    if (docSnap.exists) {
+      const data = docSnap.data();
+      const requestsOutstanding = {};
+      
+      // Extract URLs that have requestsOutstanding > 0
+      for (const [url, urlData] of Object.entries(data)) {
+        if (urlData && typeof urlData === 'object' && urlData.requestsOutstanding > 0) {
+          requestsOutstanding[url] = {
+            requestsOutstanding: urlData.requestsOutstanding
+          };
+        }
       }
+      
+      console.log('Retrieved requests outstanding from Firebase:', requestsOutstanding);
+      return requestsOutstanding;
+    } else {
+      console.log('No urlList document found');
+      return {};
     }
-    return filtered;
   } catch (error) {
-    console.error('Error in getRequestsOutstandingFromFirebase:', error);
-    return {};
+    console.error('Error getting requests outstanding from Firebase:', error);
+    throw error;
   }
 }
 

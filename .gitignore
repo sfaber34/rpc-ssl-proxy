@@ -24,3 +24,6 @@ yarn.lock
 # OS
 .DS_Store
 Thumbs.db 
+
+# Firebase service account key file
+firebase-service-account.json

@@ -1,41 +1,37 @@
 import { db } from './firebaseClient.js';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 const firebaseCollection = process.env.FIREBASE_COLLECTION;
 
-// Accepts an array of URLs
-async function clearRequestsOutstandingFromFirebase(urls) {
+async function clearRequestsOutstandingFromFirebase() {
   try {
-    if (!Array.isArray(urls) || urls.length === 0) return {};
-
-    const ref = doc(db, firebaseCollection, 'urlList');
-    const docSnap = await getDoc(ref);
-    const data = docSnap.data();
-    if (!data) return {};
-
-    let updated = false;
-    const urlSet = new Set(urls);
-
-    for (const [key, value] of Object.entries(data)) {
-      if (
-        value &&
-        typeof value.requestsOutstanding === 'number' &&
-        urlSet.has(key)
-      ) {
-        if (value.requestsOutstanding !== 0) {
-          data[key].requestsOutstanding = 0;
-          updated = true;
+    const ref = db.collection(firebaseCollection).doc('urlList');
+    const docSnap = await ref.get();
+    
+    if (docSnap.exists) {
+      const data = docSnap.data();
+      let hasOutstanding = false;
+      
+      // Set requestsOutstanding to 0 for all URLs that had outstanding requests
+      for (const [url, urlData] of Object.entries(data)) {
+        if (urlData && typeof urlData === 'object' && urlData.requestsOutstanding > 0) {
+          data[url].requestsOutstanding = 0;
+          hasOutstanding = true;
         }
       }
+      
+      if (hasOutstanding) {
+        // Update the urlList document with cleared requestsOutstanding
+        await ref.set(data);
+        console.log('Successfully cleared requestsOutstanding from all URLs in Firebase');
+      } else {
+        console.log('No outstanding requests to clear');
+      }
+    } else {
+      console.log('No urlList document found to clear');
     }
-
-    if (updated) {
-      await setDoc(ref, data);
-    }
-    return data;
   } catch (error) {
-    console.error('Error in clearRequestsOutstandingFromFirebase:', error);
-    return {};
+    console.error('Error clearing requests outstanding from Firebase:', error);
+    throw error;
   }
 }
 

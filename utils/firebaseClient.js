@@ -1,5 +1,4 @@
-import { initializeApp, getApps } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import admin from 'firebase-admin';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -9,27 +8,23 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
-};
-
-let app;
-let db;
-
-try {
-  // Prevent multiple initializations
-  app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-  db = getFirestore(app);
-} catch (error) {
-  console.error('Error initializing Firebase:', error);
-  // Re-throw the error since Firebase initialization is critical
-  throw error;
+// Initialize Firebase Admin SDK
+if (!admin.apps.length) {
+  const serviceAccount = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  
+  if (serviceAccount) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    });
+  } else {
+    // Fallback to default credentials (for production environments)
+    admin.initializeApp({
+      credential: admin.credential.applicationDefault(),
+      projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    });
+  }
 }
 
-export { app, db }; 
+// Export the Firestore instance
+export const db = admin.firestore(); 

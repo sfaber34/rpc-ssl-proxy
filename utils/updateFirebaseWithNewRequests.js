@@ -1,5 +1,4 @@
 import { db } from './firebaseClient.js';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
 const firebaseCollection = process.env.FIREBASE_COLLECTION;
 
 async function updateFirebaseWithNewRequests(urlCountMap) {
@@ -10,9 +9,9 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
     }
 
     // Reference to the urlList document
-    const ref = doc(db, firebaseCollection, 'urlList');
-    const docSnap = await getDoc(ref);
-    let urlListData = docSnap.exists() ? docSnap.data() : {};
+    const ref = db.collection(firebaseCollection).doc('urlList');
+    const docSnap = await ref.get();
+    let urlListData = docSnap.exists ? docSnap.data() : {};
 
     // Update requestsOutstanding and requestsTotal for each URL
     for (const referer in urlCountMap) {
@@ -23,28 +22,34 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
           requestsOutstanding: 0,
           requestsTotal: 0
         };
+        console.log(`NEW URL added to Firebase: ${referer} with default values`);
+      } else {
+        // Initialize requestsTotal if it doesn't exist (for existing URLs)
+        if (urlListData[referer].requestsTotal === undefined) {
+          urlListData[referer].requestsTotal = 0;
+        }
       }
 
-      const newRequests = urlCountMap[referer];
-      urlListData[referer].requestsOutstanding = 
-        (urlListData[referer].requestsOutstanding || 0) + newRequests;
-      
-      // Increment the total requests count
-      urlListData[referer].requestsTotal = 
-        (urlListData[referer].requestsTotal || 0) + newRequests;
-      
-      console.log(`Updating Firebase for ${referer}: +${newRequests} requests (total outstanding: ${urlListData[referer].requestsOutstanding}, remaining: ${urlListData[referer].requestsRemaining}, total: ${urlListData[referer].requestsTotal})`);
+      // Only update requestsOutstanding if the URL has funding (requestsRemaining > 0)
+      if (urlListData[referer].requestsRemaining > 0) {
+        urlListData[referer].requestsOutstanding = (urlListData[referer].requestsOutstanding || 0) + urlCountMap[referer];
+        console.log(`Updated requestsOutstanding for ${referer}: +${urlCountMap[referer]} (has ${urlListData[referer].requestsRemaining} remaining)`);
+      } else {
+        console.log(`Skipped requestsOutstanding update for ${referer}: no funding (${urlCountMap[referer]} requests)`);
+      }
+
+      // Always update requestsTotal regardless of funding status
+      urlListData[referer].requestsTotal = (urlListData[referer].requestsTotal || 0) + urlCountMap[referer];
+      console.log(`Updated requestsTotal for ${referer}: +${urlCountMap[referer]} (total: ${urlListData[referer].requestsTotal})`);
     }
 
-    await setDoc(ref, urlListData);
-    
-    // Clear urlCountMap
-    for (const key in urlCountMap) {
-      delete urlCountMap[key];
-    }
-    console.log('Firebase urlList updated and urlCountMap cleared.');
+    // Update the document in Firebase
+    await ref.set(urlListData);
+    console.log(`Successfully updated ${Object.keys(urlCountMap).length} URLs in Firebase`);
+
   } catch (error) {
-    console.error('Error updating urlList:', error);
+    console.error("Error updating Firebase with new requests:", error);
+    throw error;
   }
 }
 
