@@ -14,13 +14,14 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
     const docSnap = await getDoc(ref);
     let urlListData = docSnap.exists() ? docSnap.data() : {};
 
-    // Update requestsOutstanding for each URL
+    // Update requestsOutstanding and requestsTotal for each URL
     for (const referer in urlCountMap) {
       // If the URL is not present, add it with default values
       if (!urlListData[referer]) {
         urlListData[referer] = {
           requestsRemaining: 0,
-          requestsOutstanding: 0
+          requestsOutstanding: 0,
+          requestsTotal: 0
         };
       }
 
@@ -28,7 +29,11 @@ async function updateFirebaseWithNewRequests(urlCountMap) {
       urlListData[referer].requestsOutstanding = 
         (urlListData[referer].requestsOutstanding || 0) + newRequests;
       
-      console.log(`Updating Firebase for ${referer}: +${newRequests} requests (total outstanding: ${urlListData[referer].requestsOutstanding}, remaining: ${urlListData[referer].requestsRemaining})`);
+      // Increment the total requests count
+      urlListData[referer].requestsTotal = 
+        (urlListData[referer].requestsTotal || 0) + newRequests;
+      
+      console.log(`Updating Firebase for ${referer}: +${newRequests} requests (total outstanding: ${urlListData[referer].requestsOutstanding}, remaining: ${urlListData[referer].requestsRemaining}, total: ${urlListData[referer].requestsTotal})`);
     }
 
     await setDoc(ref, urlListData);

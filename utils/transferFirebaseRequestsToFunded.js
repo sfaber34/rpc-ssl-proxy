@@ -28,7 +28,8 @@ async function transferFirebaseRequestsToFunded() {
         // Get the current state of the URL
         const currentData = urlListData[url] || {
           requestsRemaining: 0,
-          requestsOutstanding: 0
+          requestsOutstanding: 0,
+          requestsTotal: 0
         };
 
         // Calculate how many requests we can actually fund
@@ -37,15 +38,17 @@ async function transferFirebaseRequestsToFunded() {
           data.requestsOutstanding
         );
 
-        // Update the URL's data
+        // Update the URL's data, preserving requestsTotal
         urlListData[url] = {
           requestsRemaining: Math.max(0, (currentData.requestsRemaining || 0) - requestsToFund),
           // If we couldn't fund all outstanding requests, keep the remainder
-          requestsOutstanding: data.requestsOutstanding - requestsToFund
+          requestsOutstanding: data.requestsOutstanding - requestsToFund,
+          // Preserve the total requests count (don't modify it here)
+          requestsTotal: currentData.requestsTotal || 0
         };
 
         totalNewlyFunded += requestsToFund;
-        console.log(`Processed ${url}: Funded ${requestsToFund} requests (${data.requestsOutstanding - requestsToFund} requests still outstanding)`);
+        console.log(`Processed ${url}: Funded ${requestsToFund} requests (${data.requestsOutstanding - requestsToFund} requests still outstanding, total: ${urlListData[url].requestsTotal})`);
       }
     }
 
