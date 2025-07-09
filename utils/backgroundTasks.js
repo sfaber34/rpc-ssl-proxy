@@ -22,6 +22,12 @@ function updateUrlCountMap(referer) {
     // Strip protocol from referer
     const cleanReferer = stripProtocol(referer);
     
+    // Skip localhost URLs (localhost:3000, localhost:3001, etc.)
+    if (cleanReferer.includes('localhost')) {
+      console.log(`Skipping localhost URL: ${cleanReferer}`);
+      return;
+    }
+    
     if (!state.urlCountMap[cleanReferer]) {
       state.urlCountMap[cleanReferer] = 0;
     }
