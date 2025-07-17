@@ -32,7 +32,7 @@ Add these environment variables to your `.env` file:
 ```bash
 # Required
 TARGET_URL=https://stage.rpc.buidlguidl.com:48544
-FALLBACK_URL=https://eth-mainnet.alchemyapi.io/v2/oKxs-03sij-U_N0iOlrSsZFr29-IqbuF
+FALLBACK_URL=https://eth-mainnet.alchemyapi.io/v2/<API-KEY>
 
 # Optional circuit breaker settings (defaults shown)
 CIRCUIT_BREAKER_FAILURE_THRESHOLD=2    # failures before switching
