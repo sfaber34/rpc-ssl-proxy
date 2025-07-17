@@ -9,6 +9,7 @@ import ethers from "ethers";
 import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
 import { updateUrlCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
+import { CircuitBreaker } from './utils/circuitBreaker.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -16,6 +17,20 @@ dotenv.config();
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
 
 const targetUrl = process.env.TARGET_URL;
+const fallbackUrl = process.env.FALLBACK_URL;
+
+console.log(`🔧 RPC Proxy Configuration:`);
+console.log(`   Primary URL: ${targetUrl || 'NOT SET'}`);
+console.log(`   Fallback URL: ${fallbackUrl || 'NOT SET'}`);
+
+// Initialize circuit breaker
+const circuitBreaker = new CircuitBreaker({
+  primaryUrl: targetUrl,
+  fallbackUrl: fallbackUrl,
+  failureThreshold: 2, // Switch to fallback after 2 consecutive failures
+  resetTimeout: 60000, // Try primary again after 60 seconds
+  requestTimeout: 10000 // 10 second timeout
+});
 
 app.use(bodyParser.json());
 app.use(cors());
@@ -26,8 +41,151 @@ var memcache = {};
 var methods = {};
 var methodsByReferer = {};
 
-app.post("/", (req, res) => {
-  if (req.headers && req.headers.referer) {
+// Helper function to make fallback requests with consistent settings
+async function makeFallbackRequest(data, headers) {
+  if (!fallbackUrl || fallbackUrl.trim() === '') {
+    throw new Error("No fallback URL configured");
+  }
+  
+  const cleanHeaders = {
+    "Content-Type": "application/json",
+    "User-Agent": headers["user-agent"] || "RPC-Proxy"
+  };
+  
+  return axios.post(fallbackUrl, data, {
+    headers: cleanHeaders,
+    timeout: 15000,
+    maxRedirects: 0,
+    httpsAgent: new https.Agent({
+      rejectUnauthorized: false
+    })
+  });
+}
+
+// Helper function to make primary requests with circuit breaker
+async function makePrimaryRequest(method, url, data, headers, timeout = 10000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    const config = {
+      method,
+      url,
+      headers: {
+        "Content-Type": "application/json",
+        ...headers,
+      },
+      signal: controller.signal,
+      timeout
+    };
+    
+    if (data && method.toLowerCase() !== 'get') {
+      config.data = data;
+    }
+    
+    const response = await axios(config);
+    clearTimeout(timeoutId);
+    
+    // Only count as success for POST requests (main RPC functionality)
+    if (method.toLowerCase() === 'post') {
+      circuitBreaker.onSuccess();
+    }
+    
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    // Only count as failure for POST requests (main RPC functionality)
+    if (method.toLowerCase() === 'post') {
+      circuitBreaker.onFailure(error);
+    }
+    
+    throw error;
+  }
+}
+
+app.post("/", async (req, res) => {
+  const isUsingFallback = circuitBreaker.isCurrentlyUsingFallback();
+  const currentUrl = circuitBreaker.getCurrentUrl();
+  
+  console.log(`📡 POST Request - Using ${isUsingFallback ? 'FALLBACK' : 'PRIMARY'}: ${currentUrl}`);
+  
+  // Track if we actually used fallback for this request (either from circuit breaker or immediate retry)
+  let actuallyUsedFallback = isUsingFallback;
+  let responseData = null;
+  
+  if (isUsingFallback) {
+    console.log(`🚨 Using fallback URL for request from ${req.headers.referer || 'unknown'} - NOT counting in Firebase`);
+  }
+
+  // Handle method counting for both single requests and batch requests
+  if (req.body) {
+    const requests = Array.isArray(req.body) ? req.body : [req.body];
+    
+    requests.forEach(request => {
+      if (request && request.method) {
+        methods[request.method] = methods[request.method]
+          ? methods[request.method] + 1
+          : 1;
+        console.log("--> METHOD", request.method, "REFERER", req.headers.referer, "URL", isUsingFallback ? "FALLBACK" : "PRIMARY");
+
+        if (!methodsByReferer[req.headers.referer]) {
+          methodsByReferer[req.headers.referer] = {};
+        }
+
+        methodsByReferer[req.headers.referer] &&
+        methodsByReferer[req.headers.referer][request.method]
+          ? methodsByReferer[req.headers.referer][request.method]++
+          : (methodsByReferer[req.headers.referer][request.method] = 1);
+      }
+    });
+  }
+
+  try {
+    let response;
+    
+    if (isUsingFallback) {
+      // Circuit breaker says use fallback - use consistent fallback function
+      response = await makeFallbackRequest(req.body, req.headers);
+      console.log("POST RESPONSE", response.data, "(FALLBACK)");
+    } else {
+      // Try primary first
+      try {
+        response = await makePrimaryRequest('post', currentUrl, req.body, req.headers);
+        console.log("POST RESPONSE", response.data, "(PRIMARY)");
+      } catch (primaryError) {
+        console.log("POST ERROR", primaryError.message, "(PRIMARY)");
+        
+        // Primary failed, try fallback immediately
+        console.log(`🔄 Retrying with fallback URL: ${fallbackUrl}`);
+        actuallyUsedFallback = true;
+        
+        response = await makeFallbackRequest(req.body, req.headers);
+        console.log("POST FALLBACK SUCCESS", response.data);
+        
+        // Early return - don't count in Firebase since we used fallback
+        responseData = response.data;
+        res.status(response.status).send(response.data);
+        console.log("🚨 Used immediate fallback - NOT counting in Firebase");
+        return;
+      }
+    }
+    
+    responseData = response.data;
+    res.status(response.status).send(response.data);
+    
+  } catch (error) {
+    console.log("POST ERROR", error.message, isUsingFallback ? "(FALLBACK)" : "(PRIMARY)");
+    console.log(`   Error details: ${error.code || 'No code'} - ${error.response?.status || 'No status'}`);
+    
+    res
+      .status(error.response ? error.response.status : 500)
+      .send(error.message);
+    return; // Don't count failed requests in Firebase
+  }
+
+  // Only count requests in Firebase if we successfully used primary URL (not fallback)
+  if (!actuallyUsedFallback && responseData && req.headers && req.headers.referer) {
     // Count requests properly for batch requests
     let requestCount = 1;
     if (Array.isArray(req.body)) {
@@ -55,6 +213,8 @@ app.post("/", (req, res) => {
         memcache[req.headers.referer]++;
       }
     }
+  } else if (actuallyUsedFallback) {
+    console.log(`🚨 Used fallback for final response - NOT counting in Firebase`);
   }
 
   // Handle method counting for both single requests and batch requests
@@ -66,7 +226,7 @@ app.post("/", (req, res) => {
         methods[request.method] = methods[request.method]
           ? methods[request.method] + 1
           : 1;
-        console.log("--> METHOD", request.method, "REFERER", req.headers.referer);
+        console.log("--> METHOD", request.method, "REFERER", req.headers.referer, "URL", actuallyUsedFallback ? "FALLBACK" : "PRIMARY");
 
         if (!methodsByReferer[req.headers.referer]) {
           methodsByReferer[req.headers.referer] = {};
@@ -79,46 +239,50 @@ app.post("/", (req, res) => {
       }
     });
   }
-  axios
-    .post(targetUrl, req.body, {
-      headers: {
-        "Content-Type": "application/json",
-        ...req.headers,
-      },
-    })
-    .then((response) => {
-      console.log("POST RESPONSE", response.data);
-      res.status(response.status).send(response.data);
-    })
-    .catch((error) => {
-      console.log("POST ERROR", error);
-      res
-        .status(error.response ? error.response.status : 500)
-        .send(error.message);
-    });
 
   console.log("POST SERVED", req.body);
 });
 
-app.get("/", (req, res) => {
+app.get("/", async (req, res) => {
   try {
+    // For GET requests, always try primary first (don't use circuit breaker logic)
+    // GET requests to RPC endpoints often return 404 even when server is healthy
     console.log("GET", req.headers.referer || "no referer");
-    axios
-      .get(targetUrl, {
-        headers: {
-          ...req.headers,
-        },
-      })
-      .then((response) => {
-        console.log("GET RESPONSE", response.data);
-        res.status(response.status).send(response.data);
-      })
-      .catch((error) => {
-        console.log("GET ERROR", error.message);
-        res
-          .status(error.response ? error.response.status : 500)
-          .send(error.message);
+    
+    try {
+      // Use a simple axios call for GET requests (no circuit breaker)
+      const response = await axios.get(targetUrl, {
+        headers: { ...req.headers },
+        timeout: 10000
       });
+      console.log("GET RESPONSE", response.data);
+      res.status(response.status).send(response.data);
+    } catch (error) {
+      console.log("GET ERROR", error.message, "- This is normal for RPC endpoints");
+      
+      // For GET requests, if primary fails and fallback is configured, try fallback
+      if (fallbackUrl && fallbackUrl.trim() !== '') {
+        try {
+          console.log("🔄 Trying GET with fallback URL...");
+          const fallbackResponse = await axios.get(fallbackUrl, {
+            headers: { ...req.headers },
+            timeout: 10000,
+            httpsAgent: new https.Agent({
+              rejectUnauthorized: false
+            })
+          });
+          console.log("GET FALLBACK SUCCESS", fallbackResponse.data);
+          res.status(fallbackResponse.status).send(fallbackResponse.data);
+          return;
+        } catch (fallbackError) {
+          console.log("GET FALLBACK ALSO FAILED", fallbackError.message, "- This is also normal for RPC endpoints");
+        }
+      }
+      
+      res
+        .status(error.response ? error.response.status : 500)
+        .send(error.message);
+    }
 
     console.log("GET REQUEST SERVED");
   } catch (err) {
@@ -129,11 +293,18 @@ app.get("/", (req, res) => {
 
 app.get("/proxy", (req, res) => {
   try {
+    const status = circuitBreaker.getStatus();
     console.log("/PROXY", req.headers.referer);
     res.send(
-      "<html><body><div style='padding:20px;font-size:18px'><H1>PROXY TO:</H1></div><pre>" +
-        targetUrl +
-        "</pre></body></html>"
+      "<html><body><div style='padding:20px;font-size:18px'>" +
+      "<H1>PROXY TO:</H1>" +
+      "<div><strong>Primary:</strong> " + targetUrl + "</div>" +
+      "<div><strong>Fallback:</strong> " + fallbackUrl + "</div>" +
+      "<div><strong>Current:</strong> " + status.currentUrl + "</div>" +
+      "<div><strong>Status:</strong> " + status.state + "</div>" +
+      "<div><strong>Using Fallback:</strong> " + status.isUsingFallback + "</div>" +
+      "<div><strong>Consecutive Failures:</strong> " + status.consecutiveFailures + "</div>" +
+      "</div></body></html>"
     );
   } catch (err) {
     console.error("/proxy error:", err);
@@ -208,6 +379,24 @@ app.get("/watchdog", (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("/watchdog error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Add circuit breaker status endpoint
+app.get("/status", (req, res) => {
+  try {
+    const status = circuitBreaker.getStatus();
+    res.json({
+      circuitBreaker: status,
+      urls: {
+        primary: targetUrl,
+        fallback: fallbackUrl
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("/status error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

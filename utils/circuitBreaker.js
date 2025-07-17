@@ -1,0 +1,119 @@
+// Circuit breaker for managing fallback between primary and secondary RPC providers
+class CircuitBreaker {
+  constructor(options = {}) {
+    this.primaryUrl = options.primaryUrl;
+    this.fallbackUrl = options.fallbackUrl;
+    
+    // Check if fallback is properly configured
+    if (!this.fallbackUrl || this.fallbackUrl.trim() === '') {
+      console.warn('⚠️  No fallback URL configured - circuit breaker will only use primary URL');
+      this.hasFallback = false;
+    } else {
+      this.hasFallback = true;
+    }
+    
+    // Circuit breaker configuration
+    this.failureThreshold = options.failureThreshold || 2; // Switch to fallback after 2 consecutive failures
+    this.resetTimeout = options.resetTimeout || 60000; // Try primary again after 60 seconds
+    this.requestTimeout = options.requestTimeout || 10000; // 10 second timeout for requests
+    
+    // State tracking
+    this.consecutiveFailures = 0;
+    this.lastFailureTime = 0;
+    this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+    this.isUsingFallback = false;
+    
+    console.log(`Circuit breaker initialized - Primary: ${this.primaryUrl}, Fallback: ${this.fallbackUrl}`);
+  }
+
+  // Get the current URL to use based on circuit breaker state
+  getCurrentUrl() {
+    const now = Date.now();
+    
+    switch (this.state) {
+      case 'CLOSED':
+        // Normal operation - use primary
+        this.isUsingFallback = false;
+        return this.primaryUrl;
+        
+      case 'OPEN':
+        // Circuit is open - check if we should try primary again
+        if (now - this.lastFailureTime >= this.resetTimeout) {
+          this.state = 'HALF_OPEN';
+          this.isUsingFallback = false;
+          console.log('🔄 Circuit breaker moving to HALF_OPEN - trying primary URL again');
+          return this.primaryUrl;
+        }
+        // If no fallback configured, force back to primary
+        if (!this.hasFallback) {
+          console.log('⚠️  No fallback available - forcing back to primary URL');
+          this.isUsingFallback = false;
+          return this.primaryUrl;
+        }
+        // Still in fallback mode
+        this.isUsingFallback = true;
+        return this.fallbackUrl;
+        
+      case 'HALF_OPEN':
+        // Testing if primary is back online
+        this.isUsingFallback = false;
+        return this.primaryUrl;
+        
+      default:
+        this.isUsingFallback = false;
+        return this.primaryUrl;
+    }
+  }
+
+  // Call this when a request succeeds
+  onSuccess() {
+    if (this.state === 'HALF_OPEN') {
+      console.log('✅ Circuit breaker: Primary URL recovered - closing circuit');
+      this.state = 'CLOSED';
+    }
+    this.consecutiveFailures = 0;
+  }
+
+  // Call this when a request fails
+  onFailure(error) {
+    this.consecutiveFailures++;
+    this.lastFailureTime = Date.now();
+    
+    console.log(`❌ Circuit breaker: Failure ${this.consecutiveFailures}/${this.failureThreshold} - ${error.message}`);
+    
+    if (this.state === 'HALF_OPEN') {
+      // Primary still not working, go back to open
+      this.state = 'OPEN';
+      this.isUsingFallback = true;
+      console.log('🚨 Circuit breaker: Primary still failing - reopening circuit');
+    } else if (this.consecutiveFailures >= this.failureThreshold && this.state === 'CLOSED') {
+      if (!this.hasFallback) {
+        console.log(`🚨 Circuit breaker: Would open but no fallback configured - staying with primary URL after ${this.consecutiveFailures} failures`);
+        // Don't change state if no fallback available
+      } else {
+        // Threshold reached, open the circuit
+        this.state = 'OPEN';
+        this.isUsingFallback = true;
+        console.log(`🚨 Circuit breaker: OPENED - switching to fallback URL after ${this.consecutiveFailures} failures`);
+      }
+    }
+  }
+
+  // Check if we're currently using the fallback
+  isCurrentlyUsingFallback() {
+    return this.isUsingFallback;
+  }
+
+  // Get status for monitoring
+  getStatus() {
+    return {
+      state: this.state,
+      consecutiveFailures: this.consecutiveFailures,
+      isUsingFallback: this.isUsingFallback,
+      currentUrl: this.getCurrentUrl(),
+      lastFailureTime: this.lastFailureTime
+    };
+  }
+}
+
+export { CircuitBreaker }; 
