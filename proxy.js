@@ -28,7 +28,15 @@ var methodsByReferer = {};
 
 app.post("/", (req, res) => {
   if (req.headers && req.headers.referer) {
-    updateUrlCountMap(req.headers.referer);
+    // Count requests properly for batch requests
+    let requestCount = 1;
+    if (Array.isArray(req.body)) {
+      requestCount = req.body.length;
+      console.log(`Batch request detected with ${requestCount} requests`);
+    }
+    
+    updateUrlCountMap(req.headers.referer, requestCount);
+    
     if (last === req.connection.remoteAddress) {
       //process.stdout.write(".");
       //process.stdout.write("-")
@@ -49,20 +57,27 @@ app.post("/", (req, res) => {
     }
   }
 
-  if (req.body && req.body.method) {
-    methods[req.body.method] = methods[req.body.method]
-      ? methods[req.body.method] + 1
-      : 1;
-    console.log("--> METHOD", req.body.method, "REFERER", req.headers.referer);
+  // Handle method counting for both single requests and batch requests
+  if (req.body) {
+    const requests = Array.isArray(req.body) ? req.body : [req.body];
+    
+    requests.forEach(request => {
+      if (request && request.method) {
+        methods[request.method] = methods[request.method]
+          ? methods[request.method] + 1
+          : 1;
+        console.log("--> METHOD", request.method, "REFERER", req.headers.referer);
 
-    if (!methodsByReferer[req.headers.referer]) {
-      methodsByReferer[req.headers.referer] = {};
-    }
+        if (!methodsByReferer[req.headers.referer]) {
+          methodsByReferer[req.headers.referer] = {};
+        }
 
-    methodsByReferer[req.headers.referer] &&
-    methodsByReferer[req.headers.referer][req.body.method]
-      ? methodsByReferer[req.headers.referer][req.body.method]++
-      : (methodsByReferer[req.headers.referer][req.body.method] = 1);
+        methodsByReferer[req.headers.referer] &&
+        methodsByReferer[req.headers.referer][request.method]
+          ? methodsByReferer[req.headers.referer][request.method]++
+          : (methodsByReferer[req.headers.referer][request.method] = 1);
+      }
+    });
   }
   axios
     .post(targetUrl, req.body, {

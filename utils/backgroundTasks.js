@@ -15,7 +15,7 @@ function stripProtocol(url) {
 }
 
 // Function to safely update the urlCountMap
-function updateUrlCountMap(referer) {
+function updateUrlCountMap(referer, count = 1) {
   try {
     if (!referer) return;
     
@@ -31,7 +31,11 @@ function updateUrlCountMap(referer) {
     if (!state.urlCountMap[cleanReferer]) {
       state.urlCountMap[cleanReferer] = 0;
     }
-    state.urlCountMap[cleanReferer]++;
+    state.urlCountMap[cleanReferer] += count;
+    
+    if (count > 1) {
+      console.log(`Added ${count} requests for ${cleanReferer} (batch request)`);
+    }
   } catch (error) {
     console.error('Error updating urlCountMap:', error);
   }
