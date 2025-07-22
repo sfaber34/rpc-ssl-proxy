@@ -32,14 +32,24 @@ class CircuitBreaker {
 
   // Send alert when circuit opens
   sendOpenAlert() {
-    const message = `------------------------------------------\n🔴 ALERT: Pre-Proxy ${this.name} circuit breaker is open. Using fallback url\nFallback URL: ${this.fallbackUrl}`;
-    sendTelegramAlert(message, 'CIRCUIT_OPEN');
+    try {
+      const message = `------------------------------------------\n🔴 ALERT: Pre-Proxy ${this.name} circuit breaker is open. Using fallback url\nFallback URL: ${this.fallbackUrl}`;
+      sendTelegramAlert(message, 'CIRCUIT_OPEN');
+    } catch (error) {
+      console.error('❌ Failed to send circuit open alert:', error.message);
+      // Don't throw - just log the error
+    }
   }
 
   // Send alert when circuit closes
   sendCloseAlert() {
-    const message = `------------------------------------------\n🟢 RECOVERY: Pre-Proxy ${this.name} circuit breaker is closed. Using main url\n\nPrimary URL: ${this.primaryUrl}\nRecovery time: ${new Date().toISOString()}`;
-    sendTelegramAlert(message, 'CIRCUIT_CLOSED');
+    try {
+      const message = `------------------------------------------\n🟢 RECOVERY: Pre-Proxy ${this.name} circuit breaker is closed. Using main url\n\nPrimary URL: ${this.primaryUrl}\nRecovery time: ${new Date().toISOString()}`;
+      sendTelegramAlert(message, 'CIRCUIT_CLOSED');
+    } catch (error) {
+      console.error('❌ Failed to send circuit close alert:', error.message);
+      // Don't throw - just log the error
+    }
   }
 
   // Get the current URL to use based on circuit breaker state
