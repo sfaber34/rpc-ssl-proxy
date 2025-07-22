@@ -1,8 +1,11 @@
 // Circuit breaker for managing fallback between primary and secondary RPC providers
+import { sendTelegramAlert } from './telegramUtils.js';
+
 class CircuitBreaker {
   constructor(options = {}) {
     this.primaryUrl = options.primaryUrl;
     this.fallbackUrl = options.fallbackUrl;
+    this.name = options.name || 'Circuit breaker'; // Name for alerts
     
     // Check if fallback is properly configured
     if (!this.fallbackUrl || this.fallbackUrl.trim() === '') {
@@ -22,8 +25,21 @@ class CircuitBreaker {
     this.lastFailureTime = 0;
     this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
     this.isUsingFallback = false;
+    this.previousState = 'CLOSED'; // Track state changes for alerts
     
     console.log(`Circuit breaker initialized - Primary: ${this.primaryUrl}, Fallback: ${this.fallbackUrl}`);
+  }
+
+  // Send alert when circuit opens
+  sendOpenAlert() {
+    const message = `------------------------------------------\n🔴 ALERT: Pre-Proxy ${this.name} circuit breaker is open. Using fallback url\nFallback URL: ${this.fallbackUrl}`;
+    sendTelegramAlert(message, 'CIRCUIT_OPEN');
+  }
+
+  // Send alert when circuit closes
+  sendCloseAlert() {
+    const message = `------------------------------------------\n🟢 RECOVERY: Pre-Proxy ${this.name} circuit breaker is closed. Using main url\n\nPrimary URL: ${this.primaryUrl}\nRecovery time: ${new Date().toISOString()}`;
+    sendTelegramAlert(message, 'CIRCUIT_CLOSED');
   }
 
   // Get the current URL to use based on circuit breaker state
@@ -70,8 +86,13 @@ class CircuitBreaker {
     if (this.state === 'HALF_OPEN') {
       console.log('✅ Circuit breaker: Primary URL recovered - closing circuit');
       this.state = 'CLOSED';
+      // Send recovery alert when transitioning from HALF_OPEN to CLOSED
+      if (this.previousState !== 'CLOSED') {
+        this.sendCloseAlert();
+      }
     }
     this.consecutiveFailures = 0;
+    this.previousState = this.state;
   }
 
   // Call this when a request fails
@@ -86,6 +107,10 @@ class CircuitBreaker {
       this.state = 'OPEN';
       this.isUsingFallback = true;
       console.log('🚨 Circuit breaker: Primary still failing - reopening circuit');
+      // Send alert when transitioning from HALF_OPEN to OPEN
+      if (this.previousState !== 'OPEN') {
+        this.sendOpenAlert();
+      }
     } else if (this.consecutiveFailures >= this.failureThreshold && this.state === 'CLOSED') {
       if (!this.hasFallback) {
         console.log(`🚨 Circuit breaker: Would open but no fallback configured - staying with primary URL after ${this.consecutiveFailures} failures`);
@@ -95,8 +120,12 @@ class CircuitBreaker {
         this.state = 'OPEN';
         this.isUsingFallback = true;
         console.log(`🚨 Circuit breaker: OPENED - switching to fallback URL after ${this.consecutiveFailures} failures`);
+        // Send alert when transitioning from CLOSED to OPEN
+        this.sendOpenAlert();
       }
     }
+    
+    this.previousState = this.state;
   }
 
   // Check if we're currently using the fallback
