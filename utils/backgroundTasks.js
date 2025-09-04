@@ -15,26 +15,32 @@ function stripProtocol(url) {
 }
 
 // Function to safely update the urlCountMap
-function updateUrlCountMap(referer, count = 1) {
+function updateUrlCountMap(origin, count = 1) {
   try {
-    if (!referer) return;
+    if (!origin) return;
     
-    // Strip protocol from referer
-    const cleanReferer = stripProtocol(referer);
+    // Strip protocol from origin
+    const cleanOrigin = stripProtocol(origin);
     
     // Skip localhost URLs (localhost:3000, localhost:3001, etc.)
-    if (cleanReferer.includes('localhost')) {
-      console.log(`Skipping localhost URL: ${cleanReferer}`);
+    if (cleanOrigin.includes('localhost')) {
+      console.log(`Skipping localhost URL: ${cleanOrigin}`);
       return;
     }
     
-    if (!state.urlCountMap[cleanReferer]) {
-      state.urlCountMap[cleanReferer] = 0;
+    // Skip buidlguidl-client origin
+    if (cleanOrigin === 'buidlguidl-client') {
+      console.log(`Skipping buidlguidl-client origin: ${cleanOrigin}`);
+      return;
     }
-    state.urlCountMap[cleanReferer] += count;
+    
+    if (!state.urlCountMap[cleanOrigin]) {
+      state.urlCountMap[cleanOrigin] = 0;
+    }
+    state.urlCountMap[cleanOrigin] += count;
     
     if (count > 1) {
-      console.log(`Added ${count} requests for ${cleanReferer} (batch request)`);
+      console.log(`Added ${count} requests for ${cleanOrigin} (batch request)`);
     }
   } catch (error) {
     console.error('Error updating urlCountMap:', error);

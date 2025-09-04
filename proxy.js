@@ -41,6 +41,44 @@ var memcache = {};
 var methods = {};
 var methodsByReferer = {};
 
+// Helper function to safely extract client IP
+function getClientIP(req) {
+  try {
+    // Check for IP behind proxy (X-Forwarded-For header)
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) {
+      // X-Forwarded-For can contain multiple IPs, get the first one
+      return forwarded.split(',')[0].trim();
+    }
+    
+    // Check for X-Real-IP header (some proxies use this)
+    const realIP = req.headers['x-real-ip'];
+    if (realIP) {
+      return realIP.trim();
+    }
+    
+    // Fall back to direct connection IP
+    return req.connection?.remoteAddress || 
+           req.socket?.remoteAddress || 
+           req.ip || 
+           'unknown';
+  } catch (error) {
+    // If anything goes wrong, return 'unknown' to avoid breaking the application
+    return 'unknown';
+  }
+}
+
+// Helper function to safely extract origin from request
+function getOrigin(req) {
+  try {
+    // Only return the actual origin header, no fallbacks
+    return req.headers.origin || 'unknown';
+  } catch (error) {
+    // If anything goes wrong, return 'unknown' to avoid breaking the application
+    return 'unknown';
+  }
+}
+
 // Helper function to make fallback requests with consistent settings
 async function makeFallbackRequest(data, headers) {
   if (!fallbackUrl || fallbackUrl.trim() === '') {
@@ -115,7 +153,7 @@ app.post("/", async (req, res) => {
   let responseData = null;
   
   if (isUsingFallback) {
-    console.log(`🚨 Using fallback URL for request from ${req.headers.referer || 'unknown'} - NOT counting in Firebase`);
+    console.log(`🚨 Using fallback URL for request from ${req.headers.origin || 'unknown'} - NOT counting in Firebase`);
   }
 
   // Handle method counting for both single requests and batch requests
@@ -127,7 +165,7 @@ app.post("/", async (req, res) => {
         methods[request.method] = methods[request.method]
           ? methods[request.method] + 1
           : 1;
-        console.log("--> METHOD", request.method, "REFERER", req.headers.referer, "URL", isUsingFallback ? "FALLBACK" : "PRIMARY");
+        console.log("--> METHOD", request.method, "REFERER", req.headers.referer, "URL", isUsingFallback ? "FALLBACK" : "PRIMARY", "IP", getClientIP(req), "ORIGIN", getOrigin(req));
 
         if (!methodsByReferer[req.headers.referer]) {
           methodsByReferer[req.headers.referer] = {};
@@ -185,7 +223,7 @@ app.post("/", async (req, res) => {
   }
 
   // Only count requests in Firebase if we successfully used primary URL (not fallback)
-  if (!actuallyUsedFallback && responseData && req.headers && req.headers.referer) {
+  if (!actuallyUsedFallback && responseData && req.headers && req.headers.origin) {
     // Count requests properly for batch requests
     let requestCount = 1;
     if (Array.isArray(req.body)) {
@@ -193,24 +231,24 @@ app.post("/", async (req, res) => {
       console.log(`Batch request detected with ${requestCount} requests`);
     }
     
-    updateUrlCountMap(req.headers.referer, requestCount);
+    updateUrlCountMap(req.headers.origin, requestCount);
     
     if (last === req.connection.remoteAddress) {
       //process.stdout.write(".");
       //process.stdout.write("-")
     } else {
       last = req.connection.remoteAddress;
-      if (!memcache[req.headers.referer]) {
-        memcache[req.headers.referer] = 1;
+      if (!memcache[req.headers.origin]) {
+        memcache[req.headers.origin] = 1;
         process.stdout.write(
           "NEW SITE " +
-            req.headers.referer +
+            req.headers.origin +
             " --> " +
             req.connection.remoteAddress
         );
         process.stdout.write("🪐 " + req.connection.remoteAddress);
       } else {
-        memcache[req.headers.referer]++;
+        memcache[req.headers.origin]++;
       }
     }
   } else if (actuallyUsedFallback) {
@@ -226,7 +264,7 @@ app.post("/", async (req, res) => {
         methods[request.method] = methods[request.method]
           ? methods[request.method] + 1
           : 1;
-        console.log("--> METHOD", request.method, "REFERER", req.headers.referer, "URL", actuallyUsedFallback ? "FALLBACK" : "PRIMARY");
+        console.log("--> METHOD", request.method, "REFERER", req.headers.referer, "URL", actuallyUsedFallback ? "FALLBACK" : "PRIMARY", "IP", getClientIP(req), "ORIGIN", getOrigin(req));
 
         if (!methodsByReferer[req.headers.referer]) {
           methodsByReferer[req.headers.referer] = {};
