@@ -185,12 +185,14 @@ app.post("/", async (req, res) => {
     if (isUsingFallback) {
       // Circuit breaker says use fallback - use consistent fallback function
       response = await makeFallbackRequest(req.body, req.headers);
-      console.log("POST RESPONSE", response.data, "(FALLBACK)");
+      // Don't delete this
+      // console.log("POST RESPONSE", response.data, "(FALLBACK)");
     } else {
       // Try primary first
       try {
         response = await makePrimaryRequest('post', currentUrl, req.body, req.headers);
-        console.log("POST RESPONSE", response.data, "(PRIMARY)");
+        // Don't delete this
+        // console.log("POST RESPONSE", response.data, "(PRIMARY)");
       } catch (primaryError) {
         console.log("POST ERROR", primaryError.message, "(PRIMARY)");
         
