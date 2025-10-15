@@ -13,6 +13,12 @@ const state = {
 
 // Function to strip protocol from URL
 function stripProtocol(url) {
+  if (!url) return '';
+  // Ensure url is a string
+  if (typeof url !== 'string') {
+    console.warn(`stripProtocol received non-string: ${typeof url}`);
+    return '';
+  }
   return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
@@ -54,6 +60,12 @@ function updateIpCountMap(ip, origin, count = 1) {
   try {
     if (!ip || ip === 'unknown') return;
     
+    // Ensure ip is a string
+    if (typeof ip !== 'string') {
+      console.warn(`updateIpCountMap received non-string IP: ${typeof ip}`);
+      return;
+    }
+    
     // Skip localhost IPs
     if (ip === '127.0.0.1' || ip === '::1' || ip.startsWith('localhost')) {
       console.log(`Skipping localhost IP: ${ip}`);
@@ -75,6 +87,11 @@ function updateIpCountMap(ip, origin, count = 1) {
     if (origin && origin !== 'unknown') {
       // Clean the origin (strip protocol and trailing slash)
       const cleanOrigin = stripProtocol(origin);
+      
+      // Skip empty origins (from stripProtocol errors)
+      if (!cleanOrigin) {
+        return;
+      }
       
       // Skip localhost origins
       if (cleanOrigin.includes('localhost')) {

@@ -48,11 +48,28 @@ var methodsByReferer = {};
 // Helper function to normalize IPv4-mapped IPv6 addresses
 function normalizeIP(ip) {
   if (!ip) return 'unknown';
+  // Ensure ip is a string
+  if (typeof ip !== 'string') {
+    console.warn(`normalizeIP received non-string: ${typeof ip}`);
+    return 'unknown';
+  }
   // Strip IPv4-mapped IPv6 prefix (::ffff:)
   if (ip.startsWith('::ffff:')) {
     return ip.substring(7);
   }
   return ip;
+}
+
+// Helper function to safely get string header value
+function getHeaderString(req, headerName) {
+  const value = req.headers[headerName];
+  if (!value) return null;
+  // Handle array headers (take first value)
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0] : null;
+  }
+  // Ensure it's a string
+  return typeof value === 'string' ? value : null;
 }
 
 // Helper function to safely extract client IP
@@ -61,18 +78,20 @@ function getClientIP(req) {
     // Priority order for proxy headers (most reliable first):
     
     // 1. Cloudflare - CF-Connecting-IP (most reliable when behind Cloudflare)
-    if (req.headers['cf-connecting-ip']) {
-      return normalizeIP(req.headers['cf-connecting-ip'].trim());
+    const cfIp = getHeaderString(req, 'cf-connecting-ip');
+    if (cfIp) {
+      return normalizeIP(cfIp.trim());
     }
     
     // 2. Akamai - True-Client-IP
-    if (req.headers['true-client-ip']) {
-      return normalizeIP(req.headers['true-client-ip'].trim());
+    const trueClientIp = getHeaderString(req, 'true-client-ip');
+    if (trueClientIp) {
+      return normalizeIP(trueClientIp.trim());
     }
     
     // 3. AWS ELB/ALB - X-Forwarded-For (when behind AWS load balancer)
     // Also used by many other proxies/load balancers
-    const forwarded = req.headers['x-forwarded-for'];
+    const forwarded = getHeaderString(req, 'x-forwarded-for');
     if (forwarded) {
       // X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
       // The FIRST IP is the original client
@@ -81,13 +100,15 @@ function getClientIP(req) {
     }
     
     // 4. Nginx and other proxies - X-Real-IP
-    if (req.headers['x-real-ip']) {
-      return normalizeIP(req.headers['x-real-ip'].trim());
+    const realIp = getHeaderString(req, 'x-real-ip');
+    if (realIp) {
+      return normalizeIP(realIp.trim());
     }
     
     // 5. Fastly CDN - Fastly-Client-IP
-    if (req.headers['fastly-client-ip']) {
-      return normalizeIP(req.headers['fastly-client-ip'].trim());
+    const fastlyIp = getHeaderString(req, 'fastly-client-ip');
+    if (fastlyIp) {
+      return normalizeIP(fastlyIp.trim());
     }
     
     // 6. Fall back to direct connection IP (when not behind a proxy)
