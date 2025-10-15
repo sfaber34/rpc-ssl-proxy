@@ -259,7 +259,7 @@ app.post("/", async (req, res) => {
   }
 
   // Only count requests in Firebase if we successfully used primary URL (not fallback)
-  if (!actuallyUsedFallback && responseData && req.headers && req.headers.origin) {
+  if (!actuallyUsedFallback && responseData && req.headers) {
     // Count requests properly for batch requests
     let requestCount = 1;
     if (Array.isArray(req.body)) {
@@ -267,25 +267,30 @@ app.post("/", async (req, res) => {
       console.log(`Batch request detected with ${requestCount} requests`);
     }
     
-    updateUrlCountMap(req.headers.origin, requestCount);
-    updateIpCountMap(getClientIP(req), requestCount);
+    // Always track IP counts (even without origin)
+    updateIpCountMap(getClientIP(req), req.headers.origin, requestCount);
     
-    if (last === req.connection.remoteAddress) {
-      //process.stdout.write(".");
-      //process.stdout.write("-")
-    } else {
-      last = req.connection.remoteAddress;
-      if (!memcache[req.headers.origin]) {
-        memcache[req.headers.origin] = 1;
-        process.stdout.write(
-          "NEW SITE " +
-            req.headers.origin +
-            " --> " +
-            req.connection.remoteAddress
-        );
-        process.stdout.write("🪐 " + req.connection.remoteAddress);
+    // Only track URL counts if origin is present
+    if (req.headers.origin) {
+      updateUrlCountMap(req.headers.origin, requestCount);
+      
+      if (last === req.connection.remoteAddress) {
+        //process.stdout.write(".");
+        //process.stdout.write("-")
       } else {
-        memcache[req.headers.origin]++;
+        last = req.connection.remoteAddress;
+        if (!memcache[req.headers.origin]) {
+          memcache[req.headers.origin] = 1;
+          process.stdout.write(
+            "NEW SITE " +
+              req.headers.origin +
+              " --> " +
+              req.connection.remoteAddress
+          );
+          process.stdout.write("🪐 " + req.connection.remoteAddress);
+        } else {
+          memcache[req.headers.origin]++;
+        }
       }
     }
   } else if (actuallyUsedFallback) {

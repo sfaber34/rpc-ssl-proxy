@@ -50,7 +50,7 @@ function updateUrlCountMap(origin, count = 1) {
 }
 
 // Function to safely update the ipCountMap
-function updateIpCountMap(ip, count = 1) {
+function updateIpCountMap(ip, origin, count = 1) {
   try {
     if (!ip || ip === 'unknown') return;
     
@@ -60,13 +60,36 @@ function updateIpCountMap(ip, count = 1) {
       return;
     }
     
+    // Initialize IP entry if it doesn't exist
     if (!state.ipCountMap[ip]) {
-      state.ipCountMap[ip] = 0;
+      state.ipCountMap[ip] = {
+        count: 0,
+        origins: {}
+      };
     }
-    state.ipCountMap[ip] += count;
+    
+    // Update total count for this IP
+    state.ipCountMap[ip].count += count;
+    
+    // Update origin count for this IP
+    if (origin && origin !== 'unknown') {
+      // Clean the origin (strip protocol and trailing slash)
+      const cleanOrigin = stripProtocol(origin);
+      
+      // Skip localhost origins
+      if (cleanOrigin.includes('localhost')) {
+        console.log(`Skipping localhost origin: ${cleanOrigin}`);
+        return;
+      }
+      
+      if (!state.ipCountMap[ip].origins[cleanOrigin]) {
+        state.ipCountMap[ip].origins[cleanOrigin] = 0;
+      }
+      state.ipCountMap[ip].origins[cleanOrigin] += count;
+    }
     
     if (count > 1) {
-      console.log(`Added ${count} requests for IP ${ip} (batch request)`);
+      console.log(`Added ${count} requests for IP ${ip} from origin ${origin} (batch request)`);
     }
   } catch (error) {
     console.error('Error updating ipCountMap:', error);
