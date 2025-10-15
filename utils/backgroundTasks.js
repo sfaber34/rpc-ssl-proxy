@@ -1,10 +1,12 @@
 import { updateFirebaseWithNewRequests } from './updateFirebaseWithNewRequests.js';
+import { updateFirebaseWithIpRequests } from './updateFirebaseWithIpRequests.js';
 import { transferFirebaseRequestsToFunded } from './transferFirebaseRequestsToFunded.js';
 import { backgroundTasksInterval } from '../config.js';
 
 // Shared state object
 const state = {
   urlCountMap: {},
+  ipCountMap: {},
   isProcessing: false,
   updateCounter: 0
 };
@@ -47,6 +49,30 @@ function updateUrlCountMap(origin, count = 1) {
   }
 }
 
+// Function to safely update the ipCountMap
+function updateIpCountMap(ip, count = 1) {
+  try {
+    if (!ip || ip === 'unknown') return;
+    
+    // Skip localhost IPs
+    if (ip === '127.0.0.1' || ip === '::1' || ip.startsWith('localhost')) {
+      console.log(`Skipping localhost IP: ${ip}`);
+      return;
+    }
+    
+    if (!state.ipCountMap[ip]) {
+      state.ipCountMap[ip] = 0;
+    }
+    state.ipCountMap[ip] += count;
+    
+    if (count > 1) {
+      console.log(`Added ${count} requests for IP ${ip} (batch request)`);
+    }
+  } catch (error) {
+    console.error('Error updating ipCountMap:', error);
+  }
+}
+
 // Function to process all background tasks
 async function processBackgroundTasks() {
   if (state.isProcessing) {
@@ -57,14 +83,19 @@ async function processBackgroundTasks() {
   try {
     state.isProcessing = true;
     
-    // Create a copy of the current urlCountMap
+    // Create a copy of the current urlCountMap and ipCountMap
     const currentUrlCountMap = { ...state.urlCountMap };
+    const currentIpCountMap = { ...state.ipCountMap };
     
-    // Clear the original map
+    // Clear the original maps
     state.urlCountMap = {};
+    state.ipCountMap = {};
     
-    // Process Firebase update
-    await updateFirebaseWithNewRequests(currentUrlCountMap);
+    // Process Firebase updates in parallel
+    await Promise.all([
+      updateFirebaseWithNewRequests(currentUrlCountMap),
+      updateFirebaseWithIpRequests(currentIpCountMap)
+    ]);
     
     // Increment counter
     state.updateCounter++;
@@ -96,6 +127,7 @@ function startBackgroundTasks() {
 
 export {
   updateUrlCountMap,
+  updateIpCountMap,
   startBackgroundTasks,
   state
 }; 

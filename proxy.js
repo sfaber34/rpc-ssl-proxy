@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import ethers from "ethers";
 import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
-import { updateUrlCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
+import { updateUrlCountMap, updateIpCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
 import { CircuitBreaker } from './utils/circuitBreaker.js';
 
 var app = express();
@@ -268,6 +268,7 @@ app.post("/", async (req, res) => {
     }
     
     updateUrlCountMap(req.headers.origin, requestCount);
+    updateIpCountMap(getClientIP(req), requestCount);
     
     if (last === req.connection.remoteAddress) {
       //process.stdout.write(".");
