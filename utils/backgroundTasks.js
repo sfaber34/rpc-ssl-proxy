@@ -72,6 +72,15 @@ function updateIpCountMap(ip, origin, count = 1) {
       return;
     }
     
+    // Skip IPs from buidlguidl-client origin
+    if (origin) {
+      const cleanOrigin = stripProtocol(origin);
+      if (cleanOrigin === 'buidlguidl-client') {
+        console.log(`Skipping IP tracking for buidlguidl-client origin: ${ip}`);
+        return;
+      }
+    }
+    
     // Initialize IP entry if it doesn't exist
     if (!state.ipCountMap[ip]) {
       state.ipCountMap[ip] = {
