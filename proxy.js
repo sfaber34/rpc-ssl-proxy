@@ -16,6 +16,10 @@ https.globalAgent.options.ca = sslRootCas.create();
 dotenv.config();
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
 
+// Trust proxy - enables Express to properly read proxy headers
+// Set to true if behind a single proxy, or set to number of proxy hops
+app.set('trust proxy', true);
+
 const targetUrl = process.env.TARGET_URL;
 const fallbackUrl = process.env.FALLBACK_URL;
 
@@ -41,29 +45,61 @@ var memcache = {};
 var methods = {};
 var methodsByReferer = {};
 
+// Helper function to normalize IPv4-mapped IPv6 addresses
+function normalizeIP(ip) {
+  if (!ip) return 'unknown';
+  // Strip IPv4-mapped IPv6 prefix (::ffff:)
+  if (ip.startsWith('::ffff:')) {
+    return ip.substring(7);
+  }
+  return ip;
+}
+
 // Helper function to safely extract client IP
 function getClientIP(req) {
   try {
-    // Check for IP behind proxy (X-Forwarded-For header)
+    // Priority order for proxy headers (most reliable first):
+    
+    // 1. Cloudflare - CF-Connecting-IP (most reliable when behind Cloudflare)
+    if (req.headers['cf-connecting-ip']) {
+      return normalizeIP(req.headers['cf-connecting-ip'].trim());
+    }
+    
+    // 2. Akamai - True-Client-IP
+    if (req.headers['true-client-ip']) {
+      return normalizeIP(req.headers['true-client-ip'].trim());
+    }
+    
+    // 3. AWS ELB/ALB - X-Forwarded-For (when behind AWS load balancer)
+    // Also used by many other proxies/load balancers
     const forwarded = req.headers['x-forwarded-for'];
     if (forwarded) {
-      // X-Forwarded-For can contain multiple IPs, get the first one
-      return forwarded.split(',')[0].trim();
+      // X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
+      // The FIRST IP is the original client
+      const ips = forwarded.split(',').map(ip => ip.trim());
+      return normalizeIP(ips[0]);
     }
     
-    // Check for X-Real-IP header (some proxies use this)
-    const realIP = req.headers['x-real-ip'];
-    if (realIP) {
-      return realIP.trim();
+    // 4. Nginx and other proxies - X-Real-IP
+    if (req.headers['x-real-ip']) {
+      return normalizeIP(req.headers['x-real-ip'].trim());
     }
     
-    // Fall back to direct connection IP
-    return req.connection?.remoteAddress || 
-           req.socket?.remoteAddress || 
-           req.ip || 
-           'unknown';
+    // 5. Fastly CDN - Fastly-Client-IP
+    if (req.headers['fastly-client-ip']) {
+      return normalizeIP(req.headers['fastly-client-ip'].trim());
+    }
+    
+    // 6. Fall back to direct connection IP (when not behind a proxy)
+    // With 'trust proxy' enabled, req.ip will use X-Forwarded-For automatically
+    const directIP = req.ip || 
+                     req.connection?.remoteAddress || 
+                     req.socket?.remoteAddress;
+    
+    return normalizeIP(directIP || 'unknown');
   } catch (error) {
     // If anything goes wrong, return 'unknown' to avoid breaking the application
+    console.error('Error extracting client IP:', error);
     return 'unknown';
   }
 }
