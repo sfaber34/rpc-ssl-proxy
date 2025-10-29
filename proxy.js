@@ -8,13 +8,17 @@ import { fileURLToPath } from 'url';
 import ethers from "ethers";
 import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
-import { updateUrlCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
+import { updateUrlCountMap, updateIpCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
 import { CircuitBreaker } from './utils/circuitBreaker.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
 dotenv.config();
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
+
+// Trust proxy - enables Express to properly read proxy headers
+// Set to true if behind a single proxy, or set to number of proxy hops
+app.set('trust proxy', true);
 
 const targetUrl = process.env.TARGET_URL;
 const fallbackUrl = process.env.FALLBACK_URL;
@@ -41,29 +45,82 @@ var memcache = {};
 var methods = {};
 var methodsByReferer = {};
 
+// Helper function to normalize IPv4-mapped IPv6 addresses
+function normalizeIP(ip) {
+  if (!ip) return 'unknown';
+  // Ensure ip is a string
+  if (typeof ip !== 'string') {
+    console.warn(`normalizeIP received non-string: ${typeof ip}`);
+    return 'unknown';
+  }
+  // Strip IPv4-mapped IPv6 prefix (::ffff:)
+  if (ip.startsWith('::ffff:')) {
+    return ip.substring(7);
+  }
+  return ip;
+}
+
+// Helper function to safely get string header value
+function getHeaderString(req, headerName) {
+  const value = req.headers[headerName];
+  if (!value) return null;
+  // Handle array headers (take first value)
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0] : null;
+  }
+  // Ensure it's a string
+  return typeof value === 'string' ? value : null;
+}
+
 // Helper function to safely extract client IP
 function getClientIP(req) {
   try {
-    // Check for IP behind proxy (X-Forwarded-For header)
-    const forwarded = req.headers['x-forwarded-for'];
+    // Priority order for proxy headers (most reliable first):
+    
+    // 1. Cloudflare - CF-Connecting-IP (most reliable when behind Cloudflare)
+    const cfIp = getHeaderString(req, 'cf-connecting-ip');
+    if (cfIp) {
+      return normalizeIP(cfIp.trim());
+    }
+    
+    // 2. Akamai - True-Client-IP
+    const trueClientIp = getHeaderString(req, 'true-client-ip');
+    if (trueClientIp) {
+      return normalizeIP(trueClientIp.trim());
+    }
+    
+    // 3. AWS ELB/ALB - X-Forwarded-For (when behind AWS load balancer)
+    // Also used by many other proxies/load balancers
+    const forwarded = getHeaderString(req, 'x-forwarded-for');
     if (forwarded) {
-      // X-Forwarded-For can contain multiple IPs, get the first one
-      return forwarded.split(',')[0].trim();
+      // X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
+      // The FIRST IP is the original client
+      const ips = forwarded.split(',').map(ip => ip.trim());
+      return normalizeIP(ips[0]);
     }
     
-    // Check for X-Real-IP header (some proxies use this)
-    const realIP = req.headers['x-real-ip'];
-    if (realIP) {
-      return realIP.trim();
+    // 4. Nginx and other proxies - X-Real-IP
+    const realIp = getHeaderString(req, 'x-real-ip');
+    if (realIp) {
+      return normalizeIP(realIp.trim());
     }
     
-    // Fall back to direct connection IP
-    return req.connection?.remoteAddress || 
-           req.socket?.remoteAddress || 
-           req.ip || 
-           'unknown';
+    // 5. Fastly CDN - Fastly-Client-IP
+    const fastlyIp = getHeaderString(req, 'fastly-client-ip');
+    if (fastlyIp) {
+      return normalizeIP(fastlyIp.trim());
+    }
+    
+    // 6. Fall back to direct connection IP (when not behind a proxy)
+    // With 'trust proxy' enabled, req.ip will use X-Forwarded-For automatically
+    const directIP = req.ip || 
+                     req.connection?.remoteAddress || 
+                     req.socket?.remoteAddress;
+    
+    return normalizeIP(directIP || 'unknown');
   } catch (error) {
     // If anything goes wrong, return 'unknown' to avoid breaking the application
+    console.error('Error extracting client IP:', error);
     return 'unknown';
   }
 }
@@ -225,7 +282,7 @@ app.post("/", async (req, res) => {
   }
 
   // Only count requests in Firebase if we successfully used primary URL (not fallback)
-  if (!actuallyUsedFallback && responseData && req.headers && req.headers.origin) {
+  if (!actuallyUsedFallback && responseData && req.headers) {
     // Count requests properly for batch requests
     let requestCount = 1;
     if (Array.isArray(req.body)) {
@@ -233,24 +290,30 @@ app.post("/", async (req, res) => {
       console.log(`Batch request detected with ${requestCount} requests`);
     }
     
-    updateUrlCountMap(req.headers.origin, requestCount);
+    // Always track IP counts (even without origin)
+    updateIpCountMap(getClientIP(req), req.headers.origin, requestCount);
     
-    if (last === req.connection.remoteAddress) {
-      //process.stdout.write(".");
-      //process.stdout.write("-")
-    } else {
-      last = req.connection.remoteAddress;
-      if (!memcache[req.headers.origin]) {
-        memcache[req.headers.origin] = 1;
-        process.stdout.write(
-          "NEW SITE " +
-            req.headers.origin +
-            " --> " +
-            req.connection.remoteAddress
-        );
-        process.stdout.write("🪐 " + req.connection.remoteAddress);
+    // Only track URL counts if origin is present
+    if (req.headers.origin) {
+      updateUrlCountMap(req.headers.origin, requestCount);
+      
+      if (last === req.connection.remoteAddress) {
+        //process.stdout.write(".");
+        //process.stdout.write("-")
       } else {
-        memcache[req.headers.origin]++;
+        last = req.connection.remoteAddress;
+        if (!memcache[req.headers.origin]) {
+          memcache[req.headers.origin] = 1;
+          process.stdout.write(
+            "NEW SITE " +
+              req.headers.origin +
+              " --> " +
+              req.connection.remoteAddress
+          );
+          process.stdout.write("🪐 " + req.connection.remoteAddress);
+        } else {
+          memcache[req.headers.origin]++;
+        }
       }
     }
   } else if (actuallyUsedFallback) {

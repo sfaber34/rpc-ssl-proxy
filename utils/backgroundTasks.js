@@ -1,16 +1,24 @@
 import { updateFirebaseWithNewRequests } from './updateFirebaseWithNewRequests.js';
+import { updateFirebaseWithIpRequests } from './updateFirebaseWithIpRequests.js';
 import { transferFirebaseRequestsToFunded } from './transferFirebaseRequestsToFunded.js';
 import { backgroundTasksInterval } from '../config.js';
 
 // Shared state object
 const state = {
   urlCountMap: {},
+  ipCountMap: {},
   isProcessing: false,
   updateCounter: 0
 };
 
 // Function to strip protocol from URL
 function stripProtocol(url) {
+  if (!url) return '';
+  // Ensure url is a string
+  if (typeof url !== 'string') {
+    console.warn(`stripProtocol received non-string: ${typeof url}`);
+    return '';
+  }
   return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
@@ -47,6 +55,73 @@ function updateUrlCountMap(origin, count = 1) {
   }
 }
 
+// Function to safely update the ipCountMap
+function updateIpCountMap(ip, origin, count = 1) {
+  try {
+    if (!ip || ip === 'unknown') return;
+    
+    // Ensure ip is a string
+    if (typeof ip !== 'string') {
+      console.warn(`updateIpCountMap received non-string IP: ${typeof ip}`);
+      return;
+    }
+    
+    // Skip localhost IPs
+    if (ip === '127.0.0.1' || ip === '::1' || ip.startsWith('localhost')) {
+      console.log(`Skipping localhost IP: ${ip}`);
+      return;
+    }
+    
+    // Skip IPs from buidlguidl-client origin
+    if (origin) {
+      const cleanOrigin = stripProtocol(origin);
+      if (cleanOrigin === 'buidlguidl-client') {
+        console.log(`Skipping IP tracking for buidlguidl-client origin: ${ip}`);
+        return;
+      }
+    }
+    
+    // Initialize IP entry if it doesn't exist
+    if (!state.ipCountMap[ip]) {
+      state.ipCountMap[ip] = {
+        count: 0,
+        origins: {}
+      };
+    }
+    
+    // Update total count for this IP
+    state.ipCountMap[ip].count += count;
+    
+    // Update origin count for this IP
+    if (origin && origin !== 'unknown') {
+      // Clean the origin (strip protocol and trailing slash)
+      const cleanOrigin = stripProtocol(origin);
+      
+      // Skip empty origins (from stripProtocol errors)
+      if (!cleanOrigin) {
+        return;
+      }
+      
+      // Skip localhost origins
+      if (cleanOrigin.includes('localhost')) {
+        console.log(`Skipping localhost origin: ${cleanOrigin}`);
+        return;
+      }
+      
+      if (!state.ipCountMap[ip].origins[cleanOrigin]) {
+        state.ipCountMap[ip].origins[cleanOrigin] = 0;
+      }
+      state.ipCountMap[ip].origins[cleanOrigin] += count;
+    }
+    
+    if (count > 1) {
+      console.log(`Added ${count} requests for IP ${ip} from origin ${origin} (batch request)`);
+    }
+  } catch (error) {
+    console.error('Error updating ipCountMap:', error);
+  }
+}
+
 // Function to process all background tasks
 async function processBackgroundTasks() {
   if (state.isProcessing) {
@@ -57,14 +132,19 @@ async function processBackgroundTasks() {
   try {
     state.isProcessing = true;
     
-    // Create a copy of the current urlCountMap
+    // Create a copy of the current urlCountMap and ipCountMap
     const currentUrlCountMap = { ...state.urlCountMap };
+    const currentIpCountMap = { ...state.ipCountMap };
     
-    // Clear the original map
+    // Clear the original maps
     state.urlCountMap = {};
+    state.ipCountMap = {};
     
-    // Process Firebase update
-    await updateFirebaseWithNewRequests(currentUrlCountMap);
+    // Process Firebase updates in parallel
+    await Promise.all([
+      updateFirebaseWithNewRequests(currentUrlCountMap),
+      updateFirebaseWithIpRequests(currentIpCountMap)
+    ]);
     
     // Increment counter
     state.updateCounter++;
@@ -96,6 +176,7 @@ function startBackgroundTasks() {
 
 export {
   updateUrlCountMap,
+  updateIpCountMap,
   startBackgroundTasks,
   state
 }; 
