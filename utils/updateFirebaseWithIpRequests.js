@@ -13,7 +13,7 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
     const hasNewRequests = Object.keys(ipCountMap).length > 0;
 
     if (!hasNewRequests) {
-      console.log("ipCountMap is empty - checking for minute reset only");
+      console.log("ipCountMap is empty - checking for hour reset only");
     } else {
       console.log(`Updating IP requests at UTC timestamp: ${currentTimestamp} (${new Date(currentTimestamp * 1000).toISOString()})`);
     }
@@ -24,23 +24,31 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
     let metadataData = metadataSnap.exists ? metadataSnap.data() : {};
 
     // Get or initialize the global lastResetTimestamp
+    let metadataNeedsInit = false;
     if (!metadataData._lastResetTimestamp) {
       console.log(`🔵 Initializing _lastResetTimestamp to ${currentTimestamp}`);
       metadataData._lastResetTimestamp = currentTimestamp;
+      metadataNeedsInit = true;
     }
 
     const lastResetTimestamp = metadataData._lastResetTimestamp;
     const secondsSinceReset = currentTimestamp - lastResetTimestamp;
-    const minuteElapsed = secondsSinceReset >= 60;
+    const hourElapsed = secondsSinceReset >= 3600;
 
     let batch = db.batch();
     let batchCount = 0;
     const MAX_BATCH_SIZE = 500; // Firestore limit
+    
+    // If we just initialized metadata, save it immediately
+    if (metadataNeedsInit) {
+      batch.set(metadataRef, metadataData);
+      batchCount++;
+    }
 
-    if (minuteElapsed) {
-      console.log(`⏰ A minute has elapsed since last reset (${secondsSinceReset}s) - resetting all requestsLastMinute to 0`);
+    if (hourElapsed) {
+      console.log(`⏰ An hour has elapsed since last reset (${secondsSinceReset}s) - resetting all requestsLastHour to 0`);
       
-      // Query all IP documents to reset requestsLastMinute
+      // Query all IP documents to reset requestsLastHour
       const ipsSnapshot = await db.collection(ipsCollectionName).get();
       
       for (const doc of ipsSnapshot.docs) {
@@ -52,7 +60,7 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
           batchCount = 0;
         }
 
-        batch.update(doc.ref, { requestsLastMinute: 0 });
+        batch.update(doc.ref, { requestsLastHour: 0 });
         batchCount++;
       }
       
@@ -63,10 +71,10 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
       
       console.log(`Scheduled reset for ${ipsSnapshot.docs.length} IP documents`);
     } else if (hasNewRequests) {
-      console.log(`⏱️  Time since last reset: ${secondsSinceReset}s (reset in ${60 - secondsSinceReset}s)`);
+      console.log(`⏱️  Time since last reset: ${secondsSinceReset}s (reset in ${3600 - secondsSinceReset}s)`);
     }
 
-    // Update requestsTotal and requestsLastMinute for each IP (only if there are new requests)
+    // Update requestsTotal and requestsLastHour for each IP (only if there are new requests)
     if (hasNewRequests) {
       for (const ip in ipCountMap) {
         const ipData = ipCountMap[ip];
@@ -87,7 +95,7 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
 
         let ipDocData = ipDoc.exists ? ipDoc.data() : {
           requestsTotal: 0,
-          requestsLastMinute: 0,
+          requestsLastHour: 0,
           origins: {}
         };
 
@@ -103,8 +111,8 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
         // Update requestsTotal
         ipDocData.requestsTotal = (ipDocData.requestsTotal || 0) + requestCount;
 
-        // Update requestsLastMinute (add to current value, already reset to 0 if minute elapsed)
-        ipDocData.requestsLastMinute = (ipDocData.requestsLastMinute || 0) + requestCount;
+        // Update requestsLastHour (add to current value, already reset to 0 if hour elapsed)
+        ipDocData.requestsLastHour = (ipDocData.requestsLastHour || 0) + requestCount;
 
         // Update origins - merge the counts
         for (const origin in origins) {
@@ -117,7 +125,7 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
         batch.set(ipRef, ipDocData);
         batchCount++;
 
-        console.log(`Updated IP ${ip}: +${requestCount} requests | Total: ${ipDocData.requestsTotal} | Last Minute: ${ipDocData.requestsLastMinute} | Origins: ${JSON.stringify(ipDocData.origins)}`);
+        console.log(`Updated IP ${ip}: +${requestCount} requests | Total: ${ipDocData.requestsTotal} | Last Hour: ${ipDocData.requestsLastHour} | Origins: ${JSON.stringify(ipDocData.origins)}`);
       }
     }
 
@@ -129,8 +137,8 @@ async function updateFirebaseWithIpRequests(ipCountMap) {
       
       if (hasNewRequests) {
         console.log(`Successfully updated ${Object.keys(ipCountMap).length} IPs in Firebase collection: ${ipsCollectionName}`);
-      } else if (minuteElapsed) {
-        console.log(`Successfully reset requestsLastMinute for all IPs in Firebase`);
+      } else if (hourElapsed) {
+        console.log(`Successfully reset requestsLastHour for all IPs in Firebase`);
       }
     }
 
