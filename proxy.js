@@ -10,6 +10,7 @@ import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
 import { updateUrlCountMap, updateIpCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
 import { CircuitBreaker } from './utils/circuitBreaker.js';
+import { checkRateLimit, incrementRequestCount, startRateLimitSync, generateRateLimitError } from './utils/rateLimiter.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -200,6 +201,17 @@ async function makePrimaryRequest(method, url, data, headers, timeout = 10000) {
 }
 
 app.post("/", async (req, res) => {
+  // Check rate limit FIRST - before any processing
+  const clientIP = getClientIP(req);
+  const rateLimitCheck = checkRateLimit(clientIP);
+  
+  if (!rateLimitCheck.allowed) {
+    console.log(`🚫 Rate limit exceeded for IP ${clientIP}: ${rateLimitCheck.currentCount}/${rateLimitCheck.limit} requests`);
+    const errorResponse = generateRateLimitError(rateLimitCheck.limit);
+    res.status(200).json(errorResponse);
+    return;
+  }
+
   const isUsingFallback = circuitBreaker.isCurrentlyUsingFallback();
   const currentUrl = circuitBreaker.getCurrentUrl();
   
@@ -288,8 +300,11 @@ app.post("/", async (req, res) => {
       console.log(`Batch request detected with ${requestCount} requests`);
     }
     
+    // Increment rate limit counter for successful requests
+    incrementRequestCount(clientIP, requestCount);
+    
     // Always track IP counts (even without origin)
-    updateIpCountMap(getClientIP(req), req.headers.origin, requestCount);
+    updateIpCountMap(clientIP, req.headers.origin, requestCount);
     
     // Only track URL counts if origin is present
     if (req.headers.origin) {
@@ -504,6 +519,9 @@ app.get("/status", (req, res) => {
 
 // Start background tasks
 startBackgroundTasks();
+
+// Start rate limit sync
+startRateLimitSync();
 
 let key, cert;
 try {
