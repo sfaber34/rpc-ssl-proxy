@@ -1,5 +1,5 @@
 import { updateFirebaseWithNewRequests } from './updateFirebaseWithNewRequests.js';
-import { updateFirebaseWithIpRequests } from './updateFirebaseWithIpRequests.js';
+import { updateRDSWithIpRequests } from './updateRDSWithIpRequests.js';
 import { transferFirebaseRequestsToFunded } from './transferFirebaseRequestsToFunded.js';
 import { backgroundTasksInterval } from '../config.js';
 
@@ -140,10 +140,10 @@ async function processBackgroundTasks() {
     state.urlCountMap = {};
     state.ipCountMap = {};
     
-    // Process Firebase updates in parallel
+    // Process updates in parallel: Firebase for domains, RDS for IPs
     await Promise.all([
       updateFirebaseWithNewRequests(currentUrlCountMap),
-      updateFirebaseWithIpRequests(currentIpCountMap)
+      updateRDSWithIpRequests(currentIpCountMap)
     ]);
     
     // Increment counter
