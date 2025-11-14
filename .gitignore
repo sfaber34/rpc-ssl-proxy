@@ -28,3 +28,6 @@ Thumbs.db
 
 # Firebase service account key file
 firebase-service-account.json
+
+#AWS DB Certificate
+rds-ca-bundle.pem
