@@ -101,6 +101,13 @@ async function updateRDSWithIpRequests(ipCountMap) {
 
   } catch (error) {
     console.error("❌ Error updating RDS with IP requests:", error);
+    console.error("Error details:", {
+      message: error.message,
+      code: error.code,
+      type: error.constructor.name
+    });
+    
+    // Throw the error so backgroundTasks can restore the data
     throw error;
   }
 }
