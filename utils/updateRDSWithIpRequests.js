@@ -5,6 +5,31 @@ function getCurrentUTCTimestamp() {
   return Math.floor(Date.now() / 1000);
 }
 
+// Store the last reset time in memory
+let lastGlobalReset = Math.floor(Date.now() / 1000);
+
+// Reset all IPs' hourly counters every hour
+async function resetHourlyCounters() {
+  try {
+    const currentTimestamp = getCurrentUTCTimestamp();
+    const hoursSinceReset = (currentTimestamp - lastGlobalReset) / 3600;
+
+    // Only reset if at least 1 hour has passed
+    if (hoursSinceReset >= 1) {
+      const pool = await getPool();
+      const result = await pool.query(
+        'UPDATE ip_table SET requests_last_hour = 0, last_reset_timestamp = $1',
+        [currentTimestamp]
+      );
+      
+      lastGlobalReset = currentTimestamp;
+      console.log(`⏰ Global hourly reset completed - Reset ${result.rowCount} IPs at ${new Date(currentTimestamp * 1000).toISOString()}`);
+    }
+  } catch (error) {
+    console.error('❌ Error during global hourly reset:', error);
+  }
+}
+
 async function updateRDSWithIpRequests(ipCountMap) {
   try {
     const currentTimestamp = getCurrentUTCTimestamp();
@@ -16,6 +41,9 @@ async function updateRDSWithIpRequests(ipCountMap) {
     }
 
     console.log(`Updating IP requests in RDS at UTC timestamp: ${currentTimestamp} (${new Date(currentTimestamp * 1000).toISOString()})`);
+
+    // Check if we need to do a global hourly reset
+    await resetHourlyCounters();
 
     const pool = await getPool();
     const client = await pool.connect();
@@ -29,12 +57,12 @@ async function updateRDSWithIpRequests(ipCountMap) {
         const requestCount = ipData.count || 0;
         const origins = ipData.origins || {};
 
-        // Merge existing origins with new ones using PostgreSQL's JSONB operators
+        // Atomic upsert with JSONB merge - much simpler now with global resets!
         // This query does everything atomically without a read-before-write:
         // 1. Inserts new IP if it doesn't exist
-        // 2. Updates existing IP
-        // 3. Handles hourly reset if needed
-        // 4. Merges origins JSONB
+        // 2. Updates existing IP by adding to counters
+        // 3. Merges origins JSONB
+        // Note: last_reset_timestamp is only updated during global reset, not here
         const query = `
           INSERT INTO ip_table (
             ip, 
@@ -42,39 +70,24 @@ async function updateRDSWithIpRequests(ipCountMap) {
             requests_last_hour, 
             last_reset_timestamp, 
             origins
-          ) VALUES ($1, $2, $3, $4, $5::jsonb)
+          ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
           ON CONFLICT (ip) DO UPDATE SET
             requests_total = ip_table.requests_total + EXCLUDED.requests_total,
-            requests_last_hour = CASE 
-              WHEN ($4 - ip_table.last_reset_timestamp) >= 3600 
-              THEN EXCLUDED.requests_last_hour
-              ELSE ip_table.requests_last_hour + EXCLUDED.requests_last_hour
-            END,
-            last_reset_timestamp = CASE
-              WHEN ($4 - ip_table.last_reset_timestamp) >= 3600
-              THEN EXCLUDED.last_reset_timestamp
-              ELSE ip_table.last_reset_timestamp
-            END,
+            requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
             origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
             updated_at = NOW()
-          RETURNING requests_total, requests_last_hour, 
-                    ($4 - last_reset_timestamp) >= 3600 as was_reset;
+          RETURNING requests_total, requests_last_hour;
         `;
 
         const values = [
           ip,
           requestCount,
-          requestCount,
-          currentTimestamp,
+          currentTimestamp, // Only used for initial INSERT
           JSON.stringify(origins)
         ];
 
         const result = await client.query(query, values);
         const row = result.rows[0];
-
-        if (row.was_reset) {
-          console.log(`⏰ Reset requestsLastHour for IP ${ip}`);
-        }
 
         console.log(`Updated IP ${ip}: +${requestCount} requests | Total: ${row.requests_total} | Last Hour: ${row.requests_last_hour} | Origins: ${JSON.stringify(origins)}`);
         updateCount++;
