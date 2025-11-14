@@ -5,34 +5,61 @@ function getCurrentUTCTimestamp() {
   return Math.floor(Date.now() / 1000);
 }
 
-// Store the last reset time in memory
-let lastGlobalReset = Math.floor(Date.now() / 1000);
+// Store the last reset time in memory (will be synced from DB)
+let lastGlobalReset = null;
 
 // Reset all IPs' hourly counters every hour
 async function resetHourlyCounters() {
   try {
     const currentTimestamp = getCurrentUTCTimestamp();
+    const pool = await getPool();
+    
+    // If we don't know the last reset time, get it from the database
+    if (lastGlobalReset === null) {
+      // Use MIN to get the oldest reset time (the actual global reset)
+      // After a global reset, all IPs have the same timestamp
+      // New IPs added later would have newer timestamps, so MAX would be wrong
+      const result = await pool.query(
+        'SELECT MIN(last_reset_timestamp) as last_reset FROM ip_table'
+      );
+      
+      if (result.rows.length > 0 && result.rows[0].last_reset) {
+        lastGlobalReset = parseInt(result.rows[0].last_reset);
+        console.log(`📅 Synced last reset time from database: ${new Date(lastGlobalReset * 1000).toISOString()}`);
+      } else {
+        // No IPs in database yet, initialize to now
+        lastGlobalReset = currentTimestamp;
+        console.log(`📅 No previous reset found, initializing to current time`);
+      }
+    }
+    
     const hoursSinceReset = (currentTimestamp - lastGlobalReset) / 3600;
 
     // Only reset if at least 1 hour has passed
     if (hoursSinceReset >= 1) {
-      const pool = await getPool();
       const result = await pool.query(
         'UPDATE ip_table SET requests_last_hour = 0, last_reset_timestamp = $1',
         [currentTimestamp]
       );
       
       lastGlobalReset = currentTimestamp;
-      console.log(`⏰ Global hourly reset completed - Reset ${result.rowCount} IPs at ${new Date(currentTimestamp * 1000).toISOString()}`);
+      console.log(`⏰ Global hourly reset completed - Reset ${result.rowCount} IPs at ${new Date(currentTimestamp * 1000).toISOString()} (${hoursSinceReset.toFixed(2)} hours since last reset)`);
     }
   } catch (error) {
     console.error('❌ Error during global hourly reset:', error);
+    // Reset lastGlobalReset so we retry fetching from DB next time
+    lastGlobalReset = null;
   }
 }
 
 async function updateRDSWithIpRequests(ipCountMap) {
   try {
     const currentTimestamp = getCurrentUTCTimestamp();
+    
+    // Always check if we need to do a global hourly reset, even if no new requests
+    // This ensures hourly resets happen on schedule regardless of traffic
+    await resetHourlyCounters();
+    
     const hasNewRequests = Object.keys(ipCountMap).length > 0;
 
     if (!hasNewRequests) {
@@ -41,9 +68,6 @@ async function updateRDSWithIpRequests(ipCountMap) {
     }
 
     console.log(`Updating IP requests in RDS at UTC timestamp: ${currentTimestamp} (${new Date(currentTimestamp * 1000).toISOString()})`);
-
-    // Check if we need to do a global hourly reset
-    await resetHourlyCounters();
 
     const pool = await getPool();
     const client = await pool.connect();
@@ -59,7 +83,7 @@ async function updateRDSWithIpRequests(ipCountMap) {
 
         // Atomic upsert with JSONB merge - much simpler now with global resets!
         // This query does everything atomically without a read-before-write:
-        // 1. Inserts new IP if it doesn't exist
+        // 1. Inserts new IP if it doesn't exist (with lastGlobalReset timestamp)
         // 2. Updates existing IP by adding to counters
         // 3. Merges origins JSONB
         // Note: last_reset_timestamp is only updated during global reset, not here
@@ -79,10 +103,12 @@ async function updateRDSWithIpRequests(ipCountMap) {
           RETURNING requests_total, requests_last_hour;
         `;
 
+        // Use lastGlobalReset for new IPs so they align with the global reset time
+        // This prevents new IPs from pushing the MIN(last_reset_timestamp) forward
         const values = [
           ip,
           requestCount,
-          currentTimestamp, // Only used for initial INSERT
+          lastGlobalReset || currentTimestamp, // Use global reset time if known
           JSON.stringify(origins)
         ];
 
