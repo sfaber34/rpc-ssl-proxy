@@ -1,5 +1,5 @@
 import { updateFirebaseWithNewRequests } from './updateFirebaseWithNewRequests.js';
-import { updateFirebaseWithIpRequests } from './updateFirebaseWithIpRequests.js';
+import { updateRDSWithIpRequests } from './updateRDSWithIpRequests.js';
 import { transferFirebaseRequestsToFunded } from './transferFirebaseRequestsToFunded.js';
 import { backgroundTasksInterval } from '../config.js';
 
@@ -140,20 +140,48 @@ async function processBackgroundTasks() {
     state.urlCountMap = {};
     state.ipCountMap = {};
     
-    // Process Firebase updates in parallel
-    await Promise.all([
-      updateFirebaseWithNewRequests(currentUrlCountMap),
-      updateFirebaseWithIpRequests(currentIpCountMap)
-    ]);
-    
-    // Increment counter
-    state.updateCounter++;
-    
-    // Every 10th update, process transfers
-    if (state.updateCounter >= 10) {
-      console.log('Running transfers after Firebase update...');
-      await transferFirebaseRequestsToFunded();
-      state.updateCounter = 0;
+    // Process updates in parallel: Firebase for domains, RDS for IPs
+    try {
+      await Promise.all([
+        updateFirebaseWithNewRequests(currentUrlCountMap),
+        updateRDSWithIpRequests(currentIpCountMap)
+      ]);
+      
+      // Increment counter only on success
+      state.updateCounter++;
+      
+      // Every 10th update, process transfers
+      if (state.updateCounter >= 10) {
+        console.log('Running transfers after Firebase update...');
+        await transferFirebaseRequestsToFunded();
+        state.updateCounter = 0;
+      }
+    } catch (dbError) {
+      console.error('❌ Database update failed, restoring data to retry next cycle:', dbError);
+      
+      // Restore data by merging back into the maps for next attempt
+      // Merge URL counts
+      for (const url in currentUrlCountMap) {
+        state.urlCountMap[url] = (state.urlCountMap[url] || 0) + currentUrlCountMap[url];
+      }
+      
+      // Merge IP counts
+      for (const ip in currentIpCountMap) {
+        if (!state.ipCountMap[ip]) {
+          state.ipCountMap[ip] = currentIpCountMap[ip];
+        } else {
+          state.ipCountMap[ip].count += currentIpCountMap[ip].count;
+          // Merge origins
+          for (const origin in currentIpCountMap[ip].origins) {
+            if (!state.ipCountMap[ip].origins[origin]) {
+              state.ipCountMap[ip].origins[origin] = 0;
+            }
+            state.ipCountMap[ip].origins[origin] += currentIpCountMap[ip].origins[origin];
+          }
+        }
+      }
+      
+      console.log('📦 Data restored. Will retry in next background task cycle.');
     }
   } catch (error) {
     console.error('Error in background tasks:', error);
