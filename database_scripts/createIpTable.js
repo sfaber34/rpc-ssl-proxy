@@ -92,7 +92,9 @@ async function createIpTable() {
           ip VARCHAR(45) PRIMARY KEY,
           requests_total BIGINT NOT NULL DEFAULT 0,
           requests_last_hour INTEGER NOT NULL DEFAULT 0,
+          requests_this_month BIGINT NOT NULL DEFAULT 0,
           last_reset_timestamp BIGINT NOT NULL,
+          last_month_reset_timestamp BIGINT,
           origins JSONB DEFAULT '{}'::jsonb,
           updated_at TIMESTAMP DEFAULT NOW()
         )
@@ -113,7 +115,9 @@ async function createIpTable() {
       console.log('  - ip (VARCHAR(45), PRIMARY KEY)');
       console.log('  - requests_total (BIGINT)');
       console.log('  - requests_last_hour (INTEGER)');
+      console.log('  - requests_this_month (BIGINT)');
       console.log('  - last_reset_timestamp (BIGINT)');
+      console.log('  - last_month_reset_timestamp (BIGINT)');
       console.log('  - origins (JSONB)');
       console.log('  - updated_at (TIMESTAMP)');
       console.log('Indexes created:');

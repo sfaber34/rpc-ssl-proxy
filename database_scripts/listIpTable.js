@@ -72,8 +72,10 @@ async function listIpTable() {
         SELECT 
           ip, 
           requests_total, 
-          requests_last_hour, 
+          requests_last_hour,
+          requests_this_month,
           last_reset_timestamp,
+          last_month_reset_timestamp,
           origins,
           updated_at
         FROM ip_table 
@@ -82,7 +84,7 @@ async function listIpTable() {
       `);
       
       console.log('\n🔍 IP Table Contents (Top 100 by requests_total):');
-      console.log('='.repeat(120));
+      console.log('='.repeat(140));
       
       if (result.rows.length === 0) {
         console.log('No records found in the ip_table.');
@@ -90,11 +92,12 @@ async function listIpTable() {
         // Print column headers
         console.log('IP Address'.padEnd(20) + 
                     'Total Reqs'.padEnd(15) + 
-                    'Last Hour'.padEnd(15) + 
-                    'Last Reset'.padEnd(25) + 
-                    'Updated At'.padEnd(25) +
+                    'Last Hour'.padEnd(12) + 
+                    'This Month'.padEnd(15) + 
+                    'Hour Reset At'.padEnd(25) + 
+                    'Last Updated'.padEnd(25) +
                     'Origins');
-        console.log('-'.repeat(120));
+        console.log('-'.repeat(140));
         
         // Print each row
         result.rows.forEach(row => {
@@ -108,7 +111,8 @@ async function listIpTable() {
           console.log(
             row.ip.padEnd(20) + 
             row.requests_total.toString().padEnd(15) + 
-            row.requests_last_hour.toString().padEnd(15) + 
+            row.requests_last_hour.toString().padEnd(12) + 
+            (row.requests_this_month || 0).toString().padEnd(15) + 
             lastReset.substring(0, 19).padEnd(25) + 
             updatedAt.substring(0, 19).padEnd(25) +
             originsPreview
@@ -118,13 +122,15 @@ async function listIpTable() {
         // Calculate and print totals
         const totalRequests = result.rows.reduce((sum, row) => sum + Number(row.requests_total), 0);
         const totalLastHour = result.rows.reduce((sum, row) => sum + Number(row.requests_last_hour), 0);
+        const totalThisMonth = result.rows.reduce((sum, row) => sum + Number(row.requests_this_month || 0), 0);
         
-        console.log('='.repeat(120));
+        console.log('='.repeat(140));
         console.log(`📊 Statistics:`);
         console.log(`   Total IPs in database: ${totalIps}`);
         console.log(`   IPs shown: ${result.rows.length}`);
         console.log(`   Total requests (shown IPs): ${totalRequests.toLocaleString()}`);
         console.log(`   Total requests last hour (shown IPs): ${totalLastHour.toLocaleString()}`);
+        console.log(`   Total requests this month (shown IPs): ${totalThisMonth.toLocaleString()}`);
         
         // Show top 5 IPs by last hour activity
         console.log('\n🔥 Top 5 Most Active IPs (Last Hour):');

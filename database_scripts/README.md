@@ -20,9 +20,11 @@ Creates the `ip_table` for tracking IP request statistics.
 
 **Schema:**
 - `ip` (VARCHAR(45), PRIMARY KEY) - IP address
-- `requests_total` (BIGINT) - Total requests from this IP
-- `requests_last_hour` (INTEGER) - Requests in the last hour
+- `requests_total` (BIGINT) - Total requests from this IP (all time)
+- `requests_last_hour` (INTEGER) - Requests in the current hour
+- `requests_this_month` (BIGINT) - Requests in the current month (UTC)
 - `last_reset_timestamp` (BIGINT) - Unix timestamp of last hourly reset
+- `last_month_reset_timestamp` (BIGINT) - Unix timestamp of last monthly reset
 - `origins` (JSONB) - Map of origin domains to request counts
 - `updated_at` (TIMESTAMP) - Last update timestamp
 
@@ -32,6 +34,22 @@ node database_scripts/createIpTable.js
 ```
 
 ⚠️ **Warning:** This will DROP the existing table if it exists. You will be prompted for confirmation.
+
+### addMonthlyColumns.js
+
+Adds monthly request tracking to an existing `ip_table` without losing data.
+
+**What it does:**
+- Adds `requests_this_month` column (BIGINT, tracks current month requests)
+- Adds `last_month_reset_timestamp` column (BIGINT, tracks UTC month boundaries)
+- Initializes all existing rows to the start of the current UTC month
+
+**Usage:**
+```bash
+node database_scripts/addMonthlyColumns.js
+```
+
+✅ **Safe Migration:** This is a non-destructive migration that preserves all existing data.
 
 ### listIpTable.js
 
@@ -57,4 +75,19 @@ The `ip_table` is optimized for high-frequency writes with:
 - Supports atomic upserts with `ON CONFLICT DO UPDATE`
 
 This design eliminates the read-before-write pattern required by Firestore, significantly improving performance and reducing costs.
+
+### Request Tracking Features
+
+**Hourly Tracking:**
+- `requests_last_hour` resets every hour at UTC hour boundaries (e.g., 14:00:00 UTC)
+- `last_reset_timestamp` stores the start of the current hour
+- Global reset ensures all IPs reset simultaneously
+
+**Monthly Tracking:**
+- `requests_this_month` resets at the start of each UTC month (e.g., 2025-12-01 00:00:00 UTC)
+- `last_month_reset_timestamp` stores the start of the current month
+- Handles variable month lengths automatically (28/29/30/31 days)
+- Global reset ensures all IPs reset simultaneously
+
+Both tracking systems use UTC timestamps and proper date boundaries to ensure reliable rollover detection.
 
