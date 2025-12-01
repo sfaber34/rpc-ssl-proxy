@@ -5,13 +5,139 @@ function getCurrentUTCTimestamp() {
   return Math.floor(Date.now() / 1000);
 }
 
+// Helper function to get the start of the current hour (rounded down to :00:00)
+function getStartOfCurrentHour(timestamp) {
+  return Math.floor(timestamp / 3600) * 3600;
+}
+
+// Helper function to get the start of the previous hour
+function getStartOfPreviousHour(timestamp) {
+  return getStartOfCurrentHour(timestamp) - 3600;
+}
+
 // Store the last reset time in memory (will be synced from DB)
 let lastGlobalReset = null;
 
-// Reset all IPs' hourly counters every hour
+// Store the last cleanup time to run cleanup once per day
+let lastCleanupTimestamp = null;
+
+// Capture hourly snapshot to ip_history_table before resetting counters
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
+async function captureHourlySnapshot(hourTimestamp) {
+  try {
+    const pool = await getPool();
+    
+    // Query all IPs with activity in the last hour
+    const snapshotQuery = `
+      SELECT ip, requests_last_hour, origins
+      FROM ip_table
+      WHERE requests_last_hour > 0
+    `;
+    
+    const result = await pool.query(snapshotQuery);
+    
+    if (result.rows.length === 0) {
+      console.log('📸 No active IPs in last hour - skipping history snapshot');
+      return;
+    }
+    
+    console.log(`📸 Capturing hourly snapshot: ${result.rows.length} active IPs for hour ${new Date(hourTimestamp * 1000).toISOString()}`);
+    
+    // Batch insert all records into ip_history_table
+    // Using INSERT ... ON CONFLICT DO NOTHING to handle any potential duplicates gracefully
+    let insertedCount = 0;
+    
+    for (const row of result.rows) {
+      try {
+        const insertQuery = `
+          INSERT INTO ip_history_table (hour_timestamp, ip, request_count, origins)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (hour_timestamp, ip) DO NOTHING
+        `;
+        
+        await pool.query(insertQuery, [
+          hourTimestamp,
+          row.ip,
+          row.requests_last_hour,
+          row.origins
+        ]);
+        
+        insertedCount++;
+      } catch (insertError) {
+        // Log individual insert errors but continue with other IPs
+        console.error(`⚠️  Failed to insert history for IP ${row.ip}:`, insertError.message);
+      }
+    }
+    
+    console.log(`✅ Snapshot captured: ${insertedCount}/${result.rows.length} IPs saved to history`);
+    
+  } catch (error) {
+    // CRITICAL: Catch all errors to prevent crashing the main proxy
+    console.error('⚠️  Error capturing hourly snapshot (non-fatal, continuing):', error.message);
+    // Do NOT throw - we want the main proxy to continue running
+  }
+}
+
+// Clean up old history records (older than 30 days)
+// Runs once per day to keep database size manageable
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
+async function cleanupOldHistory() {
+  try {
+    const currentTimestamp = getCurrentUTCTimestamp();
+    
+    // Check if we've done cleanup in the last 24 hours
+    if (lastCleanupTimestamp !== null) {
+      const hoursSinceCleanup = (currentTimestamp - lastCleanupTimestamp) / 3600;
+      if (hoursSinceCleanup < 24) {
+        // Too soon, skip cleanup
+        return;
+      }
+    }
+    
+    console.log('🧹 Running daily cleanup of old IP history records...');
+    
+    const pool = await getPool();
+    
+    // Calculate cutoff timestamp (30 days ago)
+    const cutoffQuery = `SELECT EXTRACT(EPOCH FROM NOW() - INTERVAL '30 days') as cutoff`;
+    const cutoffResult = await pool.query(cutoffQuery);
+    const cutoffTimestamp = parseInt(cutoffResult.rows[0].cutoff);
+    
+    // Check if there are old records to delete
+    const countResult = await pool.query(
+      'SELECT COUNT(*) as old_count FROM ip_history_table WHERE hour_timestamp < $1',
+      [cutoffTimestamp]
+    );
+    
+    const oldCount = parseInt(countResult.rows[0].old_count);
+    
+    if (oldCount === 0) {
+      console.log('✅ No old history records to clean up');
+      lastCleanupTimestamp = currentTimestamp;
+      return;
+    }
+    
+    // Delete old records
+    const deleteResult = await pool.query(
+      'DELETE FROM ip_history_table WHERE hour_timestamp < $1',
+      [cutoffTimestamp]
+    );
+    
+    console.log(`✅ Cleanup complete: Deleted ${deleteResult.rowCount} records older than 30 days`);
+    lastCleanupTimestamp = currentTimestamp;
+    
+  } catch (error) {
+    // CRITICAL: Catch all errors to prevent crashing the main proxy
+    console.error('⚠️  Error during history cleanup (non-fatal, continuing):', error.message);
+    // Do NOT throw - we want the main proxy to continue running
+  }
+}
+
+// Reset all IPs' hourly counters every hour (aligned to clock hour boundaries)
 async function resetHourlyCounters() {
   try {
     const currentTimestamp = getCurrentUTCTimestamp();
+    const currentHourStart = getStartOfCurrentHour(currentTimestamp);
     const pool = await getPool();
     
     // If we don't know the last reset time, get it from the database
@@ -27,23 +153,36 @@ async function resetHourlyCounters() {
         lastGlobalReset = parseInt(result.rows[0].last_reset);
         console.log(`📅 Synced last reset time from database: ${new Date(lastGlobalReset * 1000).toISOString()}`);
       } else {
-        // No IPs in database yet, initialize to now
-        lastGlobalReset = currentTimestamp;
-        console.log(`📅 No previous reset found, initializing to current time`);
+        // No IPs in database yet, initialize to start of current hour
+        lastGlobalReset = currentHourStart;
+        console.log(`📅 No previous reset found, initializing to start of current hour: ${new Date(lastGlobalReset * 1000).toISOString()}`);
       }
     }
     
-    const hoursSinceReset = (currentTimestamp - lastGlobalReset) / 3600;
-
-    // Only reset if at least 1 hour has passed
-    if (hoursSinceReset >= 1) {
+    // Check if we've crossed into a new hour boundary
+    // lastGlobalReset should be start of a previous hour, currentHourStart is start of current hour
+    if (currentHourStart > lastGlobalReset) {
+      // We've crossed into a new hour (or multiple hours if system was down)
+      const hoursPassed = (currentHourStart - lastGlobalReset) / 3600;
+      
+      console.log(`⏰ Hour boundary crossed - ${hoursPassed.toFixed(0)} hour(s) passed since ${new Date(lastGlobalReset * 1000).toISOString()}`);
+      
+      // STEP 1: Capture snapshot to history BEFORE resetting
+      // Use lastGlobalReset as the hour_timestamp (the hour that just completed)
+      await captureHourlySnapshot(lastGlobalReset);
+      
+      // STEP 2: Reset the hourly counters
+      // Set last_reset_timestamp to the start of the current hour
       const result = await pool.query(
         'UPDATE ip_table SET requests_last_hour = 0, last_reset_timestamp = $1',
-        [currentTimestamp]
+        [currentHourStart]
       );
       
-      lastGlobalReset = currentTimestamp;
-      console.log(`⏰ Global hourly reset completed - Reset ${result.rowCount} IPs at ${new Date(currentTimestamp * 1000).toISOString()} (${hoursSinceReset.toFixed(2)} hours since last reset)`);
+      lastGlobalReset = currentHourStart;
+      console.log(`✅ Global hourly reset completed - Reset ${result.rowCount} IPs to hour starting at ${new Date(currentHourStart * 1000).toISOString()}`);
+      
+      // STEP 3: Run daily cleanup if needed
+      await cleanupOldHistory();
     }
   } catch (error) {
     console.error('❌ Error during global hourly reset:', error);
@@ -105,10 +244,12 @@ async function updateRDSWithIpRequests(ipCountMap) {
 
         // Use lastGlobalReset for new IPs so they align with the global reset time
         // This prevents new IPs from pushing the MIN(last_reset_timestamp) forward
+        // If lastGlobalReset is not set, use start of current hour
+        const resetTimestamp = lastGlobalReset || getStartOfCurrentHour(currentTimestamp);
         const values = [
           ip,
           requestCount,
-          lastGlobalReset || currentTimestamp, // Use global reset time if known
+          resetTimestamp,
           JSON.stringify(origins)
         ];
 
