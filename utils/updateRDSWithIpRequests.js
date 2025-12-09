@@ -42,6 +42,10 @@ let lastMonthlyReset = null;
 // This prevents errors if the migration hasn't been run yet
 let monthlyTrackingEnabled = null;
 
+// Flag to track if the custom origin merge function exists
+// This prevents errors if the function hasn't been created yet
+let originMergeFunctionExists = null;
+
 // Store the last cleanup time to run cleanup once per day
 let lastCleanupTimestamp = null;
 
@@ -76,6 +80,45 @@ async function checkMonthlyTrackingSupport() {
     // If we can't check, assume columns don't exist to be safe
     console.error('⚠️  Could not check for monthly tracking columns (non-fatal):', error.message);
     monthlyTrackingEnabled = false;
+    return false;
+  }
+}
+
+// Check if the custom jsonb_merge_add_numeric function exists in the database
+// This function properly adds origin counts instead of overwriting them
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
+async function checkOriginMergeFunctionExists() {
+  if (originMergeFunctionExists !== null) {
+    return originMergeFunctionExists; // Already checked
+  }
+  
+  try {
+    const pool = await getPool();
+    const result = await pool.query(`
+      SELECT EXISTS (
+        SELECT 1 
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+        AND p.proname = 'jsonb_merge_add_numeric'
+      ) as exists
+    `);
+    
+    originMergeFunctionExists = result.rows[0]?.exists || false;
+    
+    if (originMergeFunctionExists) {
+      console.log('✅ Custom origin merge function detected - origin counts will accumulate correctly');
+    } else {
+      console.log('⚠️  Custom origin merge function not found - using fallback (origins will overwrite)');
+      console.log('   Run: node database_scripts/createOriginMergeFunction.js to enable proper origin tracking');
+      console.log('   ⚠️  WARNING: Without this function, origin counts will be incorrect!');
+    }
+    
+    return originMergeFunctionExists;
+  } catch (error) {
+    // If we can't check, assume function doesn't exist and use fallback
+    console.error('⚠️  Could not check for origin merge function (non-fatal):', error.message);
+    originMergeFunctionExists = false;
     return false;
   }
 }
@@ -338,6 +381,9 @@ async function updateRDSWithIpRequests(ipCountMap) {
 
       // Check if monthly tracking is supported (only once per update batch)
       const hasMonthlyTracking = await checkMonthlyTrackingSupport();
+      
+      // Check if custom origin merge function exists (only once per update batch)
+      const hasOriginMergeFunction = await checkOriginMergeFunctionExists();
 
       for (const ip in ipCountMap) {
         const ipData = ipCountMap[ip];
@@ -348,77 +394,139 @@ async function updateRDSWithIpRequests(ipCountMap) {
         // This query does everything atomically without a read-before-write:
         // 1. Inserts new IP if it doesn't exist (with reset timestamps)
         // 2. Updates existing IP by adding to counters (total, hourly, and monthly if enabled)
-        // 3. Merges origins JSONB
+        // 3. Merges origins JSONB (using custom function to ADD counts, or || operator as fallback)
         // Note: last_reset_timestamp and last_month_reset_timestamp are only updated during global resets
         
         let query, values;
         const hourlyResetTimestamp = lastGlobalReset || getStartOfCurrentHour(currentTimestamp);
         
-        if (hasMonthlyTracking) {
-          // Query with monthly tracking columns
-          query = `
-            INSERT INTO ip_table (
-              ip, 
-              requests_total, 
-              requests_last_hour,
-              requests_this_month,
-              last_reset_timestamp,
-              last_month_reset_timestamp,
-              origins
-            ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb)
-            ON CONFLICT (ip) DO UPDATE SET
-              requests_total = ip_table.requests_total + EXCLUDED.requests_total,
-              requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
-              requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
-              origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
-              updated_at = NOW()
-            RETURNING requests_total, requests_last_hour, requests_this_month;
-          `;
-          
-          const monthlyResetTimestamp = lastMonthlyReset || getStartOfCurrentMonth(currentTimestamp);
-          values = [
-            ip,
-            requestCount,
-            hourlyResetTimestamp,
-            monthlyResetTimestamp,
-            JSON.stringify(origins)
-          ];
-        } else {
-          // Legacy query without monthly tracking (backwards compatible)
-          query = `
-            INSERT INTO ip_table (
-              ip, 
-              requests_total, 
-              requests_last_hour,
-              last_reset_timestamp,
-              origins
-            ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
-            ON CONFLICT (ip) DO UPDATE SET
-              requests_total = ip_table.requests_total + EXCLUDED.requests_total,
-              requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
-              origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
-              updated_at = NOW()
-            RETURNING requests_total, requests_last_hour;
-          `;
-          
-          values = [
-            ip,
-            requestCount,
-            hourlyResetTimestamp,
-            JSON.stringify(origins)
-          ];
-        }
+        try {
+          if (hasMonthlyTracking) {
+            // Query with monthly tracking columns
+            // Use custom merge function if available, otherwise fall back to || operator
+            if (hasOriginMergeFunction) {
+              query = `
+                INSERT INTO ip_table (
+                  ip, 
+                  requests_total, 
+                  requests_last_hour,
+                  requests_this_month,
+                  last_reset_timestamp,
+                  last_month_reset_timestamp,
+                  origins
+                ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb)
+                ON CONFLICT (ip) DO UPDATE SET
+                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                  requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
+                  origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
+                  updated_at = NOW()
+                RETURNING requests_total, requests_last_hour, requests_this_month;
+              `;
+            } else {
+              query = `
+                INSERT INTO ip_table (
+                  ip, 
+                  requests_total, 
+                  requests_last_hour,
+                  requests_this_month,
+                  last_reset_timestamp,
+                  last_month_reset_timestamp,
+                  origins
+                ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb)
+                ON CONFLICT (ip) DO UPDATE SET
+                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                  requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
+                  origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
+                  updated_at = NOW()
+                RETURNING requests_total, requests_last_hour, requests_this_month;
+              `;
+            }
+            
+            const monthlyResetTimestamp = lastMonthlyReset || getStartOfCurrentMonth(currentTimestamp);
+            values = [
+              ip,
+              requestCount,
+              hourlyResetTimestamp,
+              monthlyResetTimestamp,
+              JSON.stringify(origins)
+            ];
+          } else {
+            // Legacy query without monthly tracking (backwards compatible)
+            // Use custom merge function if available, otherwise fall back to || operator
+            if (hasOriginMergeFunction) {
+              query = `
+                INSERT INTO ip_table (
+                  ip, 
+                  requests_total, 
+                  requests_last_hour,
+                  last_reset_timestamp,
+                  origins
+                ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
+                ON CONFLICT (ip) DO UPDATE SET
+                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                  origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
+                  updated_at = NOW()
+                RETURNING requests_total, requests_last_hour;
+              `;
+            } else {
+              query = `
+                INSERT INTO ip_table (
+                  ip, 
+                  requests_total, 
+                  requests_last_hour,
+                  last_reset_timestamp,
+                  origins
+                ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
+                ON CONFLICT (ip) DO UPDATE SET
+                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                  origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
+                  updated_at = NOW()
+                RETURNING requests_total, requests_last_hour;
+              `;
+            }
+            
+            values = [
+              ip,
+              requestCount,
+              hourlyResetTimestamp,
+              JSON.stringify(origins)
+            ];
+          }
 
-        const result = await client.query(query, values);
-        const row = result.rows[0];
+          const result = await client.query(query, values);
+          const row = result.rows[0];
 
-        // Log with or without monthly tracking data
-        if (hasMonthlyTracking) {
-          console.log(`Updated IP ${ip}: +${requestCount} requests | Total: ${row.requests_total} | Last Hour: ${row.requests_last_hour} | This Month: ${row.requests_this_month} | Origins: ${JSON.stringify(origins)}`);
-        } else {
-          console.log(`Updated IP ${ip}: +${requestCount} requests | Total: ${row.requests_total} | Last Hour: ${row.requests_last_hour} | Origins: ${JSON.stringify(origins)}`);
+          // Log with or without monthly tracking data
+          if (hasMonthlyTracking) {
+            console.log(`Updated IP ${ip}: +${requestCount} requests | Total: ${row.requests_total} | Last Hour: ${row.requests_last_hour} | This Month: ${row.requests_this_month} | Origins: ${JSON.stringify(origins)}`);
+          } else {
+            console.log(`Updated IP ${ip}: +${requestCount} requests | Total: ${row.requests_total} | Last Hour: ${row.requests_last_hour} | Origins: ${JSON.stringify(origins)}`);
+          }
+          updateCount++;
+          
+        } catch (queryError) {
+          // Handle individual query errors gracefully without stopping the batch
+          console.error(`⚠️  Failed to update IP ${ip}:`, {
+            error: queryError.message,
+            code: queryError.code,
+            ip: ip,
+            requestCount: requestCount
+          });
+          
+          // If this is the first IP and the error is about the merge function,
+          // reset the flag and try again with fallback on next batch
+          if (updateCount === 0 && queryError.message?.includes('jsonb_merge_add_numeric')) {
+            console.error('⚠️  Origin merge function failed - will use fallback on next update');
+            originMergeFunctionExists = null; // Reset to re-check next time
+          }
+          
+          // Continue with other IPs instead of failing the entire batch
+          continue;
         }
-        updateCount++;
       }
 
       console.log(`✅ Successfully updated ${updateCount} IPs in RDS PostgreSQL`);

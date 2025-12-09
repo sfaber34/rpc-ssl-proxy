@@ -14,6 +14,32 @@ This directory contains PostgreSQL database management scripts for the RPC SSL P
 
 ## Scripts
 
+### 🔧 createOriginMergeFunction.js
+
+**CRITICAL:** Creates a custom PostgreSQL function to fix origin tracking bug.
+
+**What it fixes:**
+- Origin counts were being **overwritten** instead of **accumulated**
+- This caused massive data loss (99%+ of origin tracking data)
+- Example: IP with 10,000 requests showed only 6 requests per origin
+
+**What it does:**
+- Creates `jsonb_merge_add_numeric()` function that properly **adds** origin counts
+- Includes comprehensive error handling and NULL safety
+- Runs automated tests to verify correct behavior
+- Self-healing: existing data will naturally correct itself after installation
+
+**Usage:**
+```bash
+node database_scripts/createOriginMergeFunction.js
+```
+
+✅ **Safe to run multiple times** - Uses `CREATE OR REPLACE`
+
+**See also:** `ORIGIN_TRACKING_FIX.md` for detailed documentation
+
+---
+
 ### createIpTable.js
 
 Creates the `ip_table` for tracking IP request statistics.
@@ -90,4 +116,57 @@ This design eliminates the read-before-write pattern required by Firestore, sign
 - Global reset ensures all IPs reset simultaneously
 
 Both tracking systems use UTC timestamps and proper date boundaries to ensure reliable rollover detection.
+
+**Origin Tracking:**
+- `origins` (JSONB) stores per-origin request counts as `{"origin.com": count}`
+- Uses custom `jsonb_merge_add_numeric()` function to properly accumulate counts
+- Falls back to `||` operator if function not available (with warning)
+- See `ORIGIN_TRACKING_FIX.md` for details on the critical bug fix
+
+## Quick Start
+
+### Initial Setup (New Database)
+
+1. Create the IP table:
+   ```bash
+   node database_scripts/createIpTable.js
+   ```
+
+2. Create the origin merge function (CRITICAL):
+   ```bash
+   node database_scripts/createOriginMergeFunction.js
+   ```
+
+3. Create the IP history table (optional, for time-series data):
+   ```bash
+   node database_scripts/createIpHistoryTable.js
+   ```
+
+### Existing Database Migration
+
+If you already have an `ip_table`:
+
+1. Add monthly tracking (if not already done):
+   ```bash
+   node database_scripts/addMonthlyColumns.js
+   ```
+
+2. **CRITICAL:** Install the origin merge function:
+   ```bash
+   node database_scripts/createOriginMergeFunction.js
+   ```
+   
+   Without this function, origin counts will be incorrect!
+
+## Troubleshooting
+
+### Origin Counts Stuck at Low Numbers
+
+If you see origin counts that don't match log activity:
+1. Run `node database_scripts/createOriginMergeFunction.js`
+2. Restart the proxy (or wait 10 seconds for auto-detection)
+3. Watch logs for: `✅ Custom origin merge function detected`
+4. Data will self-heal within hours
+
+See `ORIGIN_TRACKING_FIX.md` for detailed troubleshooting.
 
