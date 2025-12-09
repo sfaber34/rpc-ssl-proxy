@@ -46,6 +46,10 @@ let monthlyTrackingEnabled = null;
 // This prevents errors if the function hasn't been created yet
 let originMergeFunctionExists = null;
 
+// Flag to track if origins_last_hour column exists in the database
+// This prevents errors if the migration hasn't been run yet
+let originsLastHourEnabled = null;
+
 // Store the last cleanup time to run cleanup once per day
 let lastCleanupTimestamp = null;
 
@@ -123,15 +127,56 @@ async function checkOriginMergeFunctionExists() {
   }
 }
 
+// Check if origins_last_hour column exists in the database
+// This column tracks per-origin request counts for the current hour (resets hourly)
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
+async function checkOriginsLastHourSupport() {
+  if (originsLastHourEnabled !== null) {
+    return originsLastHourEnabled; // Already checked
+  }
+  
+  try {
+    const pool = await getPool();
+    const result = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'ip_table' 
+      AND column_name = 'origins_last_hour'
+    `);
+    
+    originsLastHourEnabled = result.rows.length === 1;
+    
+    if (originsLastHourEnabled) {
+      console.log('✅ origins_last_hour column detected - hourly origin tracking enabled');
+    } else {
+      console.log('⚠️  origins_last_hour column not found - hourly origin tracking disabled');
+      console.log('   Run: node database_scripts/addOriginsLastHourColumn.js to enable hourly origin tracking');
+      console.log('   ⚠️  WARNING: ip_history_table will contain cumulative origin counts (not hourly)!');
+    }
+    
+    return originsLastHourEnabled;
+  } catch (error) {
+    // If we can't check, assume column doesn't exist to be safe
+    console.error('⚠️  Could not check for origins_last_hour column (non-fatal):', error.message);
+    originsLastHourEnabled = false;
+    return false;
+  }
+}
+
 // Capture hourly snapshot to ip_history_table before resetting counters
 // CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
 async function captureHourlySnapshot(hourTimestamp) {
   try {
     const pool = await getPool();
     
+    // Check if origins_last_hour column exists
+    const hasOriginsLastHour = await checkOriginsLastHourSupport();
+    
     // Query all IPs with activity in the last hour
+    // Use origins_last_hour if available (correct hourly data), otherwise fall back to origins (cumulative)
+    const originColumn = hasOriginsLastHour ? 'origins_last_hour' : 'origins';
     const snapshotQuery = `
-      SELECT ip, requests_last_hour, origins
+      SELECT ip, requests_last_hour, ${originColumn} as origins
       FROM ip_table
       WHERE requests_last_hour > 0
     `;
@@ -143,7 +188,9 @@ async function captureHourlySnapshot(hourTimestamp) {
       return;
     }
     
+    const dataType = hasOriginsLastHour ? 'hourly origin data' : 'cumulative origin data (⚠️ not accurate for time-series)';
     console.log(`📸 Capturing hourly snapshot: ${result.rows.length} active IPs for hour ${new Date(hourTimestamp * 1000).toISOString()}`);
+    console.log(`   Using ${dataType}`);
     
     // Batch insert all records into ip_history_table
     // Using INSERT ... ON CONFLICT DO NOTHING to handle any potential duplicates gracefully
@@ -336,13 +383,26 @@ async function resetHourlyCounters() {
       
       // STEP 2: Reset the hourly counters
       // Set last_reset_timestamp to the start of the current hour
-      const result = await pool.query(
-        'UPDATE ip_table SET requests_last_hour = 0, last_reset_timestamp = $1',
-        [currentHourStart]
-      );
+      // Also reset origins_last_hour if that column exists
+      const hasOriginsLastHour = await checkOriginsLastHourSupport();
+      
+      let resetQuery, result;
+      if (hasOriginsLastHour) {
+        resetQuery = `
+          UPDATE ip_table 
+          SET requests_last_hour = 0, 
+              origins_last_hour = '{}'::jsonb,
+              last_reset_timestamp = $1
+        `;
+        result = await pool.query(resetQuery, [currentHourStart]);
+        console.log(`✅ Global hourly reset completed - Reset ${result.rowCount} IPs (requests_last_hour and origins_last_hour) to hour starting at ${new Date(currentHourStart * 1000).toISOString()}`);
+      } else {
+        resetQuery = 'UPDATE ip_table SET requests_last_hour = 0, last_reset_timestamp = $1';
+        result = await pool.query(resetQuery, [currentHourStart]);
+        console.log(`✅ Global hourly reset completed - Reset ${result.rowCount} IPs to hour starting at ${new Date(currentHourStart * 1000).toISOString()}`);
+      }
       
       lastGlobalReset = currentHourStart;
-      console.log(`✅ Global hourly reset completed - Reset ${result.rowCount} IPs to hour starting at ${new Date(currentHourStart * 1000).toISOString()}`);
       
       // STEP 3: Run daily cleanup if needed
       await cleanupOldHistory();
@@ -384,6 +444,9 @@ async function updateRDSWithIpRequests(ipCountMap) {
       
       // Check if custom origin merge function exists (only once per update batch)
       const hasOriginMergeFunction = await checkOriginMergeFunctionExists();
+      
+      // Check if origins_last_hour column exists (only once per update batch)
+      const hasOriginsLastHour = await checkOriginsLastHourSupport();
 
       for (const ip in ipCountMap) {
         const ipData = ipCountMap[ip];
@@ -404,44 +467,92 @@ async function updateRDSWithIpRequests(ipCountMap) {
           if (hasMonthlyTracking) {
             // Query with monthly tracking columns
             // Use custom merge function if available, otherwise fall back to || operator
-            if (hasOriginMergeFunction) {
-              query = `
-                INSERT INTO ip_table (
-                  ip, 
-                  requests_total, 
-                  requests_last_hour,
-                  requests_this_month,
-                  last_reset_timestamp,
-                  last_month_reset_timestamp,
-                  origins
-                ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb)
-                ON CONFLICT (ip) DO UPDATE SET
-                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
-                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
-                  requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
-                  origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
-                  updated_at = NOW()
-                RETURNING requests_total, requests_last_hour, requests_this_month;
-              `;
+            if (hasOriginsLastHour) {
+              // With origins_last_hour column - track both cumulative and hourly origins
+              if (hasOriginMergeFunction) {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    requests_this_month,
+                    last_reset_timestamp,
+                    last_month_reset_timestamp,
+                    origins,
+                    origins_last_hour
+                  ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb, $5::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
+                    origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
+                    origins_last_hour = jsonb_merge_add_numeric(COALESCE(ip_table.origins_last_hour, '{}'::jsonb), EXCLUDED.origins_last_hour),
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour, requests_this_month;
+                `;
+              } else {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    requests_this_month,
+                    last_reset_timestamp,
+                    last_month_reset_timestamp,
+                    origins,
+                    origins_last_hour
+                  ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb, $5::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
+                    origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
+                    origins_last_hour = COALESCE(ip_table.origins_last_hour, '{}'::jsonb) || EXCLUDED.origins_last_hour,
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour, requests_this_month;
+                `;
+              }
             } else {
-              query = `
-                INSERT INTO ip_table (
-                  ip, 
-                  requests_total, 
-                  requests_last_hour,
-                  requests_this_month,
-                  last_reset_timestamp,
-                  last_month_reset_timestamp,
-                  origins
-                ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb)
-                ON CONFLICT (ip) DO UPDATE SET
-                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
-                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
-                  requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
-                  origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
-                  updated_at = NOW()
-                RETURNING requests_total, requests_last_hour, requests_this_month;
-              `;
+              // Without origins_last_hour column - legacy behavior
+              if (hasOriginMergeFunction) {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    requests_this_month,
+                    last_reset_timestamp,
+                    last_month_reset_timestamp,
+                    origins
+                  ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
+                    origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour, requests_this_month;
+                `;
+              } else {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    requests_this_month,
+                    last_reset_timestamp,
+                    last_month_reset_timestamp,
+                    origins
+                  ) VALUES ($1, $2::bigint, $2::integer, $2::bigint, $3, $4, $5::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    requests_this_month = ip_table.requests_this_month + EXCLUDED.requests_this_month,
+                    origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour, requests_this_month;
+                `;
+              }
             }
             
             const monthlyResetTimestamp = lastMonthlyReset || getStartOfCurrentMonth(currentTimestamp);
@@ -455,38 +566,80 @@ async function updateRDSWithIpRequests(ipCountMap) {
           } else {
             // Legacy query without monthly tracking (backwards compatible)
             // Use custom merge function if available, otherwise fall back to || operator
-            if (hasOriginMergeFunction) {
-              query = `
-                INSERT INTO ip_table (
-                  ip, 
-                  requests_total, 
-                  requests_last_hour,
-                  last_reset_timestamp,
-                  origins
-                ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
-                ON CONFLICT (ip) DO UPDATE SET
-                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
-                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
-                  origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
-                  updated_at = NOW()
-                RETURNING requests_total, requests_last_hour;
-              `;
+            if (hasOriginsLastHour) {
+              // With origins_last_hour column - track both cumulative and hourly origins
+              if (hasOriginMergeFunction) {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    last_reset_timestamp,
+                    origins,
+                    origins_last_hour
+                  ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb, $4::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
+                    origins_last_hour = jsonb_merge_add_numeric(COALESCE(ip_table.origins_last_hour, '{}'::jsonb), EXCLUDED.origins_last_hour),
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour;
+                `;
+              } else {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    last_reset_timestamp,
+                    origins,
+                    origins_last_hour
+                  ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb, $4::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
+                    origins_last_hour = COALESCE(ip_table.origins_last_hour, '{}'::jsonb) || EXCLUDED.origins_last_hour,
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour;
+                `;
+              }
             } else {
-              query = `
-                INSERT INTO ip_table (
-                  ip, 
-                  requests_total, 
-                  requests_last_hour,
-                  last_reset_timestamp,
-                  origins
-                ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
-                ON CONFLICT (ip) DO UPDATE SET
-                  requests_total = ip_table.requests_total + EXCLUDED.requests_total,
-                  requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
-                  origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
-                  updated_at = NOW()
-                RETURNING requests_total, requests_last_hour;
-              `;
+              // Without origins_last_hour column - legacy behavior
+              if (hasOriginMergeFunction) {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    last_reset_timestamp,
+                    origins
+                  ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    origins = jsonb_merge_add_numeric(COALESCE(ip_table.origins, '{}'::jsonb), EXCLUDED.origins),
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour;
+                `;
+              } else {
+                query = `
+                  INSERT INTO ip_table (
+                    ip, 
+                    requests_total, 
+                    requests_last_hour,
+                    last_reset_timestamp,
+                    origins
+                  ) VALUES ($1, $2::bigint, $2::integer, $3, $4::jsonb)
+                  ON CONFLICT (ip) DO UPDATE SET
+                    requests_total = ip_table.requests_total + EXCLUDED.requests_total,
+                    requests_last_hour = ip_table.requests_last_hour + EXCLUDED.requests_last_hour,
+                    origins = COALESCE(ip_table.origins, '{}'::jsonb) || EXCLUDED.origins,
+                    updated_at = NOW()
+                  RETURNING requests_total, requests_last_hour;
+                `;
+              }
             }
             
             values = [
