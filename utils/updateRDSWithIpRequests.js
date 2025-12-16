@@ -1,4 +1,5 @@
 import { getPool } from './postgresClient.js';
+import { filterOrigins } from './originValidator.js';
 
 // Helper function to get current UTC timestamp in seconds
 function getCurrentUTCTimestamp() {
@@ -451,7 +452,25 @@ async function updateRDSWithIpRequests(ipCountMap) {
       for (const ip in ipCountMap) {
         const ipData = ipCountMap[ip];
         const requestCount = ipData.count || 0;
-        const origins = ipData.origins || {};
+        
+        // Filter out local/test origins before database write
+        // CRITICAL: Wrapped in try-catch to prevent filtering errors from breaking database writes
+        let origins = {};
+        try {
+          const rawOrigins = ipData.origins || {};
+          origins = filterOrigins(rawOrigins);
+          
+          // Log if origins were filtered out
+          const originalCount = Object.keys(rawOrigins).length;
+          const filteredCount = Object.keys(origins).length;
+          if (originalCount > filteredCount) {
+            console.log(`🔒 IP ${ip}: Filtered ${originalCount - filteredCount} local origin(s), keeping ${filteredCount} real domain(s)`);
+          }
+        } catch (filterError) {
+          // If filtering fails completely, use empty origins (safe fallback)
+          console.error(`⚠️  Origin filtering failed for IP ${ip} - using empty origins:`, filterError.message);
+          origins = {};
+        }
 
         // Atomic upsert with JSONB merge - handles hourly tracking (and optionally monthly)
         // This query does everything atomically without a read-before-write:
