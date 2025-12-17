@@ -436,6 +436,7 @@ async function resetMonthlyCounters() {
 
 // Reset all IPs' hourly counters every hour (aligned to clock hour boundaries)
 // With sliding window support, this SHIFTS current hour data to previous hour before resetting
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
 async function resetHourlyCounters() {
   try {
     const currentTimestamp = getCurrentUTCTimestamp();
@@ -551,9 +552,11 @@ async function resetHourlyCounters() {
       await cleanupOldHistory();
     }
   } catch (error) {
-    console.error('❌ Error during global hourly reset:', error);
+    // CRITICAL: Catch all errors to prevent crashing the main proxy
+    console.error('⚠️  Error during hourly reset (non-fatal, continuing):', error.message);
     // Reset lastGlobalReset so we retry fetching from DB next time
     lastGlobalReset = null;
+    // Do NOT throw - we want the main proxy to continue running
   }
 }
 

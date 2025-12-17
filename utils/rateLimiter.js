@@ -197,9 +197,13 @@ async function pollRateLimitData() {
     
     let originsQuery, ipsQuery;
     
+    // Performance safeguard: limit results to prevent memory issues with large tables
+    // 10000 should be more than enough for legitimate origins/IPs
+    const QUERY_LIMIT = 10000;
+    
     if (hasSlidingWindow) {
       // Sliding window: effective_count = current_hour + (previous_hour × weight)
-      // This smooths out the hour boundary problem
+      // Query ALL origins/IPs with any hourly activity, determine blocking in code
       
       originsQuery = `
         WITH current_hour AS (
@@ -222,10 +226,11 @@ async function pollRateLimitData() {
           COALESCE(c.origin, p.origin) as origin,
           COALESCE(c.current_requests, 0) as current_requests,
           COALESCE(p.previous_requests, 0) as previous_requests,
-          COALESCE(c.current_requests, 0) + (COALESCE(p.previous_requests, 0) * $2::numeric) as effective_requests
+          COALESCE(c.current_requests, 0) + (COALESCE(p.previous_requests, 0) * $1::numeric) as effective_requests
         FROM current_hour c
         FULL OUTER JOIN previous_hour p ON c.origin = p.origin
-        WHERE COALESCE(c.current_requests, 0) + (COALESCE(p.previous_requests, 0) * $2::numeric) > $1
+        ORDER BY effective_requests DESC
+        LIMIT ${QUERY_LIMIT}
       `;
       
       ipsQuery = `
@@ -233,7 +238,7 @@ async function pollRateLimitData() {
           ip,
           requests_last_hour as current_requests,
           requests_previous_hour as previous_requests,
-          requests_last_hour + (requests_previous_hour * $2::numeric) as effective_requests,
+          requests_last_hour + (requests_previous_hour * $1::numeric) as effective_requests,
           COALESCE(
             (SELECT SUM((value)::bigint) FROM jsonb_each_text(COALESCE(${originColumn}, '{}'::jsonb))),
             0
@@ -243,10 +248,12 @@ async function pollRateLimitData() {
             0
           ) as origin_requests_previous
         FROM ip_table
-        WHERE requests_last_hour + (requests_previous_hour * $2::numeric) > $1
+        WHERE requests_last_hour > 0 OR requests_previous_hour > 0
+        ORDER BY effective_requests DESC
+        LIMIT ${QUERY_LIMIT}
       `;
     } else {
-      // Fixed window (legacy behavior)
+      // Fixed window (legacy behavior) - query ALL with any activity
       originsQuery = `
         SELECT 
           origin_key as origin,
@@ -256,7 +263,8 @@ async function pollRateLimitData() {
         FROM ip_table, 
              jsonb_each_text(COALESCE(${originColumn}, '{}'::jsonb)) AS x(origin_key, origin_value)
         GROUP BY origin_key
-        HAVING SUM((origin_value)::bigint) > $1
+        ORDER BY effective_requests DESC
+        LIMIT ${QUERY_LIMIT}
       `;
       
       ipsQuery = `
@@ -271,14 +279,17 @@ async function pollRateLimitData() {
           ) as origin_requests_current,
           0 as origin_requests_previous
         FROM ip_table
-        WHERE requests_last_hour > $1
+        WHERE requests_last_hour > 0
+        ORDER BY effective_requests DESC
+        LIMIT ${QUERY_LIMIT}
       `;
     }
     
-    const originsResult = await pool.query(originsQuery, [originRateLimitPerHour, previousHourWeight]);
-    const ipsResult = await pool.query(ipsQuery, [ipRateLimitPerHour, previousHourWeight]);
+    // Note: queries now only take the weight parameter, not the limit
+    const originsResult = await pool.query(originsQuery, [previousHourWeight]);
+    const ipsResult = await pool.query(ipsQuery, [previousHourWeight]);
 
-    // Update blocked origins (hourly)
+    // Process ALL origins - store counts for all, block only if over limit
     const newBlockedOrigins = new Set();
     const newOriginCurrentHour = new Map();
     const newOriginPreviousHour = new Map();
@@ -291,14 +302,19 @@ async function pollRateLimitData() {
         const previousHour = parseInt(row.previous_requests) || 0;
         const effective = Math.round(parseFloat(row.effective_requests));
         
-        newBlockedOrigins.add(cleanOrigin);
+        // Store counts for ALL origins
         newOriginCurrentHour.set(cleanOrigin, currentHour);
         newOriginPreviousHour.set(cleanOrigin, previousHour);
         newOriginEffective.set(cleanOrigin, effective);
+        
+        // Only block if over limit
+        if (effective > originRateLimitPerHour) {
+          newBlockedOrigins.add(cleanOrigin);
+        }
       }
     }
 
-    // Update blocked IPs (hourly) - only those where no-origin requests exceed limit
+    // Process ALL IPs - store counts for all, block only if over limit
     const newBlockedIPs = new Set();
     const newIpCurrentHour = new Map();
     const newIpPreviousHour = new Map();
@@ -317,12 +333,16 @@ async function pollRateLimitData() {
       const noOriginCurrent = currentTotal - originCurrent;
       const noOriginPrevious = previousTotal - originPrevious;
       
-      // Only block if the no-origin portion exceeds the IP limit
-      if (effectiveNoOrigin > ipRateLimitPerHour) {
-        newBlockedIPs.add(row.ip);
+      // Store counts for ALL IPs (if they have any no-origin requests)
+      if (noOriginCurrent > 0 || noOriginPrevious > 0 || effectiveNoOrigin > 0) {
         newIpCurrentHour.set(row.ip, noOriginCurrent);
         newIpPreviousHour.set(row.ip, noOriginPrevious);
         newIpEffective.set(row.ip, Math.round(effectiveNoOrigin));
+      }
+      
+      // Only block if over limit
+      if (effectiveNoOrigin > ipRateLimitPerHour) {
+        newBlockedIPs.add(row.ip);
       }
     }
 
@@ -336,7 +356,8 @@ async function pollRateLimitData() {
     const newIpDailyCounts = new Map();
     
     if (hasDailyLimit) {
-      // Query daily origin counts
+      // Query ALL daily origin counts (not just over-limit)
+      // We need all counts for status display, then determine blocking separately
       const dailyOriginsQuery = `
         SELECT 
           origin_key as origin,
@@ -344,20 +365,26 @@ async function pollRateLimitData() {
         FROM ip_table, 
              jsonb_each_text(COALESCE(origins_today, '{}'::jsonb)) AS x(origin_key, origin_value)
         GROUP BY origin_key
-        HAVING SUM((origin_value)::bigint) > $1
+        ORDER BY total_requests DESC
+        LIMIT ${QUERY_LIMIT}
       `;
       
-      const dailyOriginsResult = await pool.query(dailyOriginsQuery, [originRateLimitPerDay]);
+      const dailyOriginsResult = await pool.query(dailyOriginsQuery);
       
       for (const row of dailyOriginsResult.rows) {
         const cleanOrigin = stripProtocol(row.origin);
         if (cleanOrigin && !isLocalOrigin(cleanOrigin)) {
-          newDailyBlockedOrigins.add(cleanOrigin);
-          newOriginDailyCounts.set(cleanOrigin, parseInt(row.total_requests));
+          const dailyCount = parseInt(row.total_requests);
+          newOriginDailyCounts.set(cleanOrigin, dailyCount);
+          
+          // Block if over daily limit
+          if (dailyCount > originRateLimitPerDay) {
+            newDailyBlockedOrigins.add(cleanOrigin);
+          }
         }
       }
       
-      // Query daily IP counts (no-origin requests)
+      // Query ALL daily IP counts (not just over-limit)
       const dailyIpsQuery = `
         SELECT 
           ip,
@@ -367,19 +394,26 @@ async function pollRateLimitData() {
             0
           ) as origin_requests
         FROM ip_table
-        WHERE requests_today > $1
+        WHERE requests_today > 0
+        ORDER BY requests_today DESC
+        LIMIT ${QUERY_LIMIT}
       `;
       
-      const dailyIpsResult = await pool.query(dailyIpsQuery, [ipRateLimitPerDay]);
+      const dailyIpsResult = await pool.query(dailyIpsQuery);
       
       for (const row of dailyIpsResult.rows) {
         const totalRequests = parseInt(row.requests_today);
         const originRequests = parseInt(row.origin_requests);
         const noOriginRequests = totalRequests - originRequests;
         
+        // Store the daily count
+        if (noOriginRequests > 0) {
+          newIpDailyCounts.set(row.ip, noOriginRequests);
+        }
+        
+        // Block if over daily limit
         if (noOriginRequests > ipRateLimitPerDay) {
           newDailyBlockedIPs.add(row.ip);
-          newIpDailyCounts.set(row.ip, noOriginRequests);
         }
       }
     }
@@ -437,74 +471,80 @@ async function pollRateLimitData() {
 /**
  * Check if a request should be rate limited
  * Checks both hourly (sliding window) and daily limits
+ * 
+ * CRITICAL: This function is called on every request and MUST:
+ * - Be fast (no I/O, just in-memory lookups)
+ * - Never throw errors (wrapped in try-catch)
+ * - Default to ALLOWING requests if anything goes wrong (fail open for availability)
+ * 
  * @param {string} ip - The client IP address
  * @param {string} origin - The request origin (may be null/undefined)
  * @returns {object} { limited: boolean, reason: string|null, retryAfter: number|null }
  */
 function checkRateLimit(ip, origin) {
-  const cleanOrigin = stripProtocol(origin);
-  const hasRealOrigin = cleanOrigin && !isLocalOrigin(cleanOrigin);
+  try {
+    const cleanOrigin = stripProtocol(origin);
+    const hasRealOrigin = cleanOrigin && !isLocalOrigin(cleanOrigin);
 
-  // Debug logging to understand rate limit decisions
-  console.log(`🔍 Rate limit check: IP=${ip}, origin=${origin || 'none'}, cleanOrigin=${cleanOrigin || 'none'}, hasRealOrigin=${hasRealOrigin}`);
-  console.log(`   Hourly blocked - IPs: [${[...state.blockedIPs].join(', ')}], Origins: [${[...state.blockedOrigins].join(', ')}]`);
-  console.log(`   Daily blocked - IPs: [${[...state.dailyBlockedIPs].join(', ')}], Origins: [${[...state.dailyBlockedOrigins].join(', ')}]`);
+    if (hasRealOrigin) {
+      // This is a deployed app - check origin-based limits
+      
+      // Check DAILY limit first (longer block)
+      if (state.dailyBlockedOrigins.has(cleanOrigin)) {
+        const count = state.originDailyCounts.get(cleanOrigin) || 0;
+        console.log(`🚦 Rate limited: Origin ${cleanOrigin} exceeded daily limit (${count}/${originRateLimitPerDay})`);
+        return {
+          limited: true,
+          reason: `Origin ${cleanOrigin} has exceeded daily rate limit (${count}/${originRateLimitPerDay} requests/day)`,
+          retryAfter: getSecondsUntilMidnightUTC()
+        };
+      }
+      
+      // Check HOURLY limit (sliding window)
+      if (state.blockedOrigins.has(cleanOrigin)) {
+        const count = state.originEffective.get(cleanOrigin) || 0;
+        console.log(`🚦 Rate limited: Origin ${cleanOrigin} exceeded hourly limit (~${count}/${originRateLimitPerHour})`);
+        return {
+          limited: true,
+          reason: `Origin ${cleanOrigin} has exceeded hourly rate limit (~${count}/${originRateLimitPerHour} requests/hour)`,
+          retryAfter: getSecondsUntilNextHour()
+        };
+      }
+    } else {
+      // This is local testing - check IP-based limits
+      
+      // Check DAILY limit first (longer block)
+      if (state.dailyBlockedIPs.has(ip)) {
+        const count = state.ipDailyCounts.get(ip) || 0;
+        console.log(`🚦 Rate limited: IP ${ip} exceeded daily limit (${count}/${ipRateLimitPerDay})`);
+        return {
+          limited: true,
+          reason: `IP ${ip} has exceeded daily rate limit for non-origin requests (${count}/${ipRateLimitPerDay} requests/day)`,
+          retryAfter: getSecondsUntilMidnightUTC()
+        };
+      }
+      
+      // Check HOURLY limit (sliding window)
+      if (state.blockedIPs.has(ip)) {
+        const count = state.ipEffective.get(ip) || 0;
+        console.log(`🚦 Rate limited: IP ${ip} exceeded hourly limit (~${count}/${ipRateLimitPerHour})`);
+        return {
+          limited: true,
+          reason: `IP ${ip} has exceeded hourly rate limit for non-origin requests (~${count}/${ipRateLimitPerHour} requests/hour)`,
+          retryAfter: getSecondsUntilNextHour()
+        };
+      }
+    }
 
-  if (hasRealOrigin) {
-    // This is a deployed app - check origin-based limits
+    // Not rate limited
+    return { limited: false, reason: null, retryAfter: null };
     
-    // Check DAILY limit first (longer block)
-    if (state.dailyBlockedOrigins.has(cleanOrigin)) {
-      const count = state.originDailyCounts.get(cleanOrigin) || 0;
-      console.log(`   ❌ DAILY ORIGIN limit exceeded: ${cleanOrigin}`);
-      return {
-        limited: true,
-        reason: `Origin ${cleanOrigin} has exceeded daily rate limit (${count}/${originRateLimitPerDay} requests/day)`,
-        retryAfter: getSecondsUntilMidnightUTC()
-      };
-    }
-    
-    // Check HOURLY limit (sliding window)
-    if (state.blockedOrigins.has(cleanOrigin)) {
-      const count = state.originEffective.get(cleanOrigin) || 0;
-      console.log(`   ❌ HOURLY ORIGIN limit exceeded: ${cleanOrigin}`);
-      return {
-        limited: true,
-        reason: `Origin ${cleanOrigin} has exceeded hourly rate limit (~${count}/${originRateLimitPerHour} requests/hour)`,
-        retryAfter: getSecondsUntilNextHour()
-      };
-    }
-    
-    console.log(`   ✅ Origin ${cleanOrigin} is within limits`);
-  } else {
-    // This is local testing - check IP-based limits
-    
-    // Check DAILY limit first (longer block)
-    if (state.dailyBlockedIPs.has(ip)) {
-      const count = state.ipDailyCounts.get(ip) || 0;
-      console.log(`   ❌ DAILY IP limit exceeded: ${ip}`);
-      return {
-        limited: true,
-        reason: `IP ${ip} has exceeded daily rate limit for non-origin requests (${count}/${ipRateLimitPerDay} requests/day)`,
-        retryAfter: getSecondsUntilMidnightUTC()
-      };
-    }
-    
-    // Check HOURLY limit (sliding window)
-    if (state.blockedIPs.has(ip)) {
-      const count = state.ipEffective.get(ip) || 0;
-      console.log(`   ❌ HOURLY IP limit exceeded: ${ip}`);
-      return {
-        limited: true,
-        reason: `IP ${ip} has exceeded hourly rate limit for non-origin requests (~${count}/${ipRateLimitPerHour} requests/hour)`,
-        retryAfter: getSecondsUntilNextHour()
-      };
-    }
-    
-    console.log(`   ✅ IP ${ip} is within limits`);
+  } catch (error) {
+    // CRITICAL: Never let rate limiting errors block legitimate traffic
+    // If something goes wrong, fail open (allow the request)
+    console.error('⚠️  Rate limit check error (allowing request):', error.message);
+    return { limited: false, reason: null, retryAfter: null };
   }
-
-  return { limited: false, reason: null, retryAfter: null };
 }
 
 /**
