@@ -528,7 +528,7 @@ app.get("/status", (req, res) => {
 });
 
 // Rate limit status endpoint (for monitoring)
-app.get("/ratelimit-status", (req, res) => {
+app.get("/ratelimitstatus", (req, res) => {
   try {
     const status = getRateLimitStatus();
     res.json({
@@ -536,7 +536,7 @@ app.get("/ratelimit-status", (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (err) {
-    console.error("/ratelimit-status error:", err);
+    console.error("/ratelimitstatus error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
