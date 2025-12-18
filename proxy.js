@@ -10,6 +10,7 @@ import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
 import { updateUrlCountMap, updateIpCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
 import { CircuitBreaker } from './utils/circuitBreaker.js';
+import { validateRpcRequest } from './utils/requestValidator.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -38,6 +39,9 @@ const circuitBreaker = new CircuitBreaker({
 
 app.use(bodyParser.json());
 app.use(cors());
+
+// Validate RPC requests early to avoid forwarding invalid requests to downstream service
+app.use(validateRpcRequest);
 
 var last = "";
 
