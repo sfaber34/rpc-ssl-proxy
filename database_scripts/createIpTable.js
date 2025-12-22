@@ -87,15 +87,35 @@ async function createIpTable() {
       // Drop the table if it exists and create a new one
       await client.query('DROP TABLE IF EXISTS ip_table');
       
+      // Create table with ALL columns (base + all migrations)
       await client.query(`
         CREATE TABLE ip_table (
+          -- Primary key
           ip VARCHAR(45) PRIMARY KEY,
+          
+          -- Cumulative totals
           requests_total BIGINT NOT NULL DEFAULT 0,
-          requests_last_hour INTEGER NOT NULL DEFAULT 0,
-          requests_this_month BIGINT NOT NULL DEFAULT 0,
-          last_reset_timestamp BIGINT NOT NULL,
-          last_month_reset_timestamp BIGINT,
           origins JSONB DEFAULT '{}'::jsonb,
+          
+          -- Hourly tracking (current hour)
+          requests_last_hour INTEGER NOT NULL DEFAULT 0,
+          origins_last_hour JSONB DEFAULT '{}'::jsonb,
+          last_reset_timestamp BIGINT NOT NULL,
+          
+          -- Sliding window (previous hour for weighted calculation)
+          requests_previous_hour INTEGER NOT NULL DEFAULT 0,
+          origins_previous_hour JSONB DEFAULT '{}'::jsonb,
+          
+          -- Daily tracking
+          requests_today BIGINT NOT NULL DEFAULT 0,
+          origins_today JSONB DEFAULT '{}'::jsonb,
+          last_day_reset_timestamp BIGINT,
+          
+          -- Monthly tracking
+          requests_this_month BIGINT NOT NULL DEFAULT 0,
+          last_month_reset_timestamp BIGINT,
+          
+          -- Metadata
           updated_at TIMESTAMP DEFAULT NOW()
         )
       `);
@@ -111,15 +131,38 @@ async function createIpTable() {
       `);
       
       console.log('✅ IP table created successfully');
+      console.log('');
       console.log('Table schema:');
-      console.log('  - ip (VARCHAR(45), PRIMARY KEY)');
-      console.log('  - requests_total (BIGINT)');
-      console.log('  - requests_last_hour (INTEGER)');
-      console.log('  - requests_this_month (BIGINT)');
-      console.log('  - last_reset_timestamp (BIGINT)');
-      console.log('  - last_month_reset_timestamp (BIGINT)');
-      console.log('  - origins (JSONB)');
-      console.log('  - updated_at (TIMESTAMP)');
+      console.log('');
+      console.log('  Primary Key:');
+      console.log('    - ip (VARCHAR(45))');
+      console.log('');
+      console.log('  Cumulative Totals:');
+      console.log('    - requests_total (BIGINT) - all-time request count');
+      console.log('    - origins (JSONB) - all-time per-origin counts');
+      console.log('');
+      console.log('  Hourly Tracking (current hour):');
+      console.log('    - requests_last_hour (INTEGER) - requests this hour');
+      console.log('    - origins_last_hour (JSONB) - per-origin counts this hour');
+      console.log('    - last_reset_timestamp (BIGINT) - when hourly counters were reset');
+      console.log('');
+      console.log('  Sliding Window (previous hour):');
+      console.log('    - requests_previous_hour (INTEGER) - requests last hour');
+      console.log('    - origins_previous_hour (JSONB) - per-origin counts last hour');
+      console.log('    (Used for weighted rate limit calculation)');
+      console.log('');
+      console.log('  Daily Tracking:');
+      console.log('    - requests_today (BIGINT) - requests today');
+      console.log('    - origins_today (JSONB) - per-origin counts today');
+      console.log('    - last_day_reset_timestamp (BIGINT) - when daily counters were reset');
+      console.log('');
+      console.log('  Monthly Tracking:');
+      console.log('    - requests_this_month (BIGINT) - requests this month');
+      console.log('    - last_month_reset_timestamp (BIGINT) - when monthly counters were reset');
+      console.log('');
+      console.log('  Metadata:');
+      console.log('    - updated_at (TIMESTAMP)');
+      console.log('');
       console.log('Indexes created:');
       console.log('  - idx_ip_last_reset on last_reset_timestamp');
       console.log('  - idx_ip_updated_at on updated_at');

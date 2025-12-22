@@ -10,6 +10,7 @@ import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
 import { updateUrlCountMap, updateIpCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
 import { CircuitBreaker } from './utils/circuitBreaker.js';
+import { checkRateLimit, buildRateLimitResponse, getRateLimitStatus, startRateLimitPolling, getSecondsUntilNextHour } from './utils/rateLimiter.js';
 import { validateRpcRequest } from './utils/requestValidator.js';
 
 var app = express();
@@ -204,6 +205,30 @@ async function makePrimaryRequest(method, url, data, headers, timeout = 10000) {
 }
 
 app.post("/", async (req, res) => {
+  const clientIP = getClientIP(req);
+  const origin = req.headers.origin;
+  
+  // Check rate limit FIRST before any other processing
+  const rateLimitResult = checkRateLimit(clientIP, origin);
+  if (rateLimitResult.limited) {
+    console.log(`🚫 Rate limited: ${rateLimitResult.reason}`);
+    
+    // Extract request ID from body (handle both single and batch requests)
+    let requestId = null;
+    if (req.body) {
+      if (Array.isArray(req.body) && req.body.length > 0) {
+        requestId = req.body[0]?.id ?? null;
+      } else {
+        requestId = req.body?.id ?? null;
+      }
+    }
+    
+    res.status(429)
+      .set('Retry-After', String(rateLimitResult.retryAfter || getSecondsUntilNextHour()))
+      .json(buildRateLimitResponse(requestId));
+    return;
+  }
+  
   const isUsingFallback = circuitBreaker.isCurrentlyUsingFallback();
   const currentUrl = circuitBreaker.getCurrentUrl();
   
@@ -506,8 +531,25 @@ app.get("/status", (req, res) => {
   }
 });
 
+// Rate limit status endpoint (for monitoring)
+app.get("/ratelimitstatus", (req, res) => {
+  try {
+    const status = getRateLimitStatus();
+    res.json({
+      ...status,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("/ratelimitstatus error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Start background tasks
 startBackgroundTasks();
+
+// Start rate limit polling
+startRateLimitPolling();
 
 let key, cert;
 try {
