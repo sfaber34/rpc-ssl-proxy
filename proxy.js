@@ -13,6 +13,7 @@ import { CircuitBreaker } from './utils/circuitBreaker.js';
 import { checkRateLimit, buildRateLimitResponse, getRateLimitStatus, startRateLimitPolling, getSecondsUntilNextHour } from './utils/rateLimiter.js';
 import { validateRpcRequest } from './utils/requestValidator.js';
 import { isIPBlacklisted, startWatchingBlacklist, getBlacklistStatus } from './utils/ipBlacklist.js';
+import { requireAdminKey } from './utils/adminAuth.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -553,8 +554,8 @@ app.get("/status", (req, res) => {
   }
 });
 
-// Rate limit status endpoint (for monitoring)
-app.get("/ratelimitstatus", (req, res) => {
+// Rate limit status endpoint (for monitoring) - protected by API key
+app.get("/ratelimitstatus", requireAdminKey, (req, res) => {
   try {
     const status = getRateLimitStatus();
     res.json({
@@ -567,8 +568,8 @@ app.get("/ratelimitstatus", (req, res) => {
   }
 });
 
-// IP blacklist status endpoint (for monitoring)
-app.get("/blackliststatus", (req, res) => {
+// IP blacklist status endpoint (for monitoring) - protected by API key
+app.get("/blackliststatus", requireAdminKey, (req, res) => {
   try {
     const status = getBlacklistStatus();
     res.json({
