@@ -12,6 +12,7 @@ import { updateUrlCountMap, updateIpCountMap, startBackgroundTasks } from './uti
 import { CircuitBreaker } from './utils/circuitBreaker.js';
 import { checkRateLimit, buildRateLimitResponse, getRateLimitStatus, startRateLimitPolling, getSecondsUntilNextHour } from './utils/rateLimiter.js';
 import { validateRpcRequest } from './utils/requestValidator.js';
+import { isIPBlacklisted, startWatchingBlacklist, getBlacklistStatus } from './utils/ipBlacklist.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -208,7 +209,28 @@ app.post("/", async (req, res) => {
   const clientIP = getClientIP(req);
   const origin = req.headers.origin;
   
-  // Check rate limit FIRST before any other processing
+  // Check IP blacklist FIRST before any other processing
+  if (isIPBlacklisted(clientIP)) {
+    console.log(`🚫 Blacklisted IP blocked: ${clientIP}`);
+    
+    // Extract request ID from body (handle both single and batch requests)
+    let requestId = null;
+    if (req.body) {
+      if (Array.isArray(req.body) && req.body.length > 0) {
+        requestId = req.body[0]?.id ?? null;
+      } else {
+        requestId = req.body?.id ?? null;
+      }
+    }
+    
+    // Return the same rate limit error for blacklisted IPs
+    res.status(429)
+      .set('Retry-After', '3600') // 1 hour
+      .json(buildRateLimitResponse(requestId));
+    return;
+  }
+  
+  // Check rate limit before any other processing
   const rateLimitResult = checkRateLimit(clientIP, origin);
   if (rateLimitResult.limited) {
     console.log(`🚫 Rate limited: ${rateLimitResult.reason}`);
@@ -545,11 +567,28 @@ app.get("/ratelimitstatus", (req, res) => {
   }
 });
 
+// IP blacklist status endpoint (for monitoring)
+app.get("/blackliststatus", (req, res) => {
+  try {
+    const status = getBlacklistStatus();
+    res.json({
+      ...status,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("/blackliststatus error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Start background tasks
 startBackgroundTasks();
 
 // Start rate limit polling
 startRateLimitPolling();
+
+// Start IP blacklist watcher
+startWatchingBlacklist();
 
 let key, cert;
 try {

@@ -33,3 +33,6 @@ firebase-service-account.json
 rds-ca-bundle.pem
 
 requestReject.log
+
+# IP blacklist (may contain sensitive IPs)
+ip_blacklist.txt

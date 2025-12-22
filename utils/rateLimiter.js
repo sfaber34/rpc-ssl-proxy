@@ -585,7 +585,7 @@ function buildRateLimitResponse(requestId = null) {
     id: requestId,
     error: {
       code: -32005,
-      message: "Rate limit exceeded. Please slow down or contact support if you need higher limits."
+      message: "Rate limit exceeded."
     }
   };
 }
