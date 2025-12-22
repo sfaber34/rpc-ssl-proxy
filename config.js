@@ -25,7 +25,7 @@ const ipRateLimitPerHour = 1000;      // Max requests per rolling hour for an IP
 // Daily limits (hard cap, resets at midnight UTC)
 // Set these lower than 24× hourly to provide meaningful secondary protection
 const originRateLimitPerDay = 40000;  // Max requests per day for a single origin
-const ipRateLimitPerDay = 12000;      // Max requests per day for an IP with no origin
+const ipRateLimitPerDay = 5000;      // Max requests per day for an IP with no origin
 
 // Polling interval
 const rateLimitPollInterval = 10;   // How often to poll DB for rate limit data (seconds)
