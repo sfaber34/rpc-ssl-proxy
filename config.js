@@ -19,13 +19,13 @@ const backgroundTasksInterval = 10; //seconds
 // =============================================================================
 
 // Hourly limits (used with sliding window approximation)
-const originRateLimitPerHour = 1000;  // Max requests per rolling hour for a single origin (deployed app)
-const ipRateLimitPerHour = 4000;      // Max requests per rolling hour for an IP with no origin (local testing)
+const originRateLimitPerHour = 4000;  // Max requests per rolling hour for a single origin (deployed app)
+const ipRateLimitPerHour = 1000;      // Max requests per rolling hour for an IP with no origin (local testing)
 
 // Daily limits (hard cap, resets at midnight UTC)
 // Set these lower than 24× hourly to provide meaningful secondary protection
-const originRateLimitPerDay = 12000;  // Max requests per day for a single origin
-const ipRateLimitPerDay = 40000;      // Max requests per day for an IP with no origin
+const originRateLimitPerDay = 40000;  // Max requests per day for a single origin
+const ipRateLimitPerDay = 12000;      // Max requests per day for an IP with no origin
 
 // Polling interval
 const rateLimitPollInterval = 10;   // How often to poll DB for rate limit data (seconds)
