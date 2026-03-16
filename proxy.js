@@ -14,6 +14,7 @@ import { checkRateLimit, buildRateLimitResponse, getRateLimitStatus, startRateLi
 import { validateRpcRequest } from './utils/requestValidator.js';
 import { isIPBlacklisted, startWatchingBlacklist, getBlacklistStatus } from './utils/ipBlacklist.js';
 import { requireAdminKey } from './utils/adminAuth.js';
+import { defaultRequestCount, methodRequestCounts } from './config.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -37,7 +38,7 @@ const circuitBreaker = new CircuitBreaker({
   fallbackUrl: fallbackUrl,
   failureThreshold: 2, // Switch to fallback after 2 consecutive failures
   resetTimeout: 60000, // Try primary again after 60 seconds
-  requestTimeout: 10000 // 10 second timeout
+  requestTimeout: 15000 // 15 second timeout
 });
 
 app.use(bodyParser.json());
@@ -165,7 +166,7 @@ async function makeFallbackRequest(data, headers) {
 }
 
 // Helper function to make primary requests with circuit breaker
-async function makePrimaryRequest(method, url, data, headers, timeout = 10000) {
+async function makePrimaryRequest(method, url, data, headers, timeout = 15000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   
@@ -333,13 +334,17 @@ app.post("/", async (req, res) => {
 
   // Only count requests in Firebase if we successfully used primary URL (not fallback)
   if (!actuallyUsedFallback && responseData && req.headers) {
-    // Count requests properly for batch requests
-    let requestCount = 1;
-    if (Array.isArray(req.body)) {
-      requestCount = req.body.length;
-      console.log(`Batch request detected with ${requestCount} requests`);
+    // Weighted request count for rate limiting (heavy methods count for more)
+    const requests = Array.isArray(req.body) ? req.body : [req.body];
+    const requestCount = requests.reduce((sum, r) => {
+      if (!r || typeof r.method !== 'string') return sum + defaultRequestCount;
+      const weight = methodRequestCounts[r.method] ?? defaultRequestCount;
+      return sum + weight;
+    }, 0);
+    if (requests.length > 1 || requestCount !== requests.length) {
+      console.log(`Request count: ${requests.length} call(s) → ${requestCount} weighted unit(s)`);
     }
-    
+
     // Always track IP counts (even without origin)
     updateIpCountMap(getClientIP(req), req.headers.origin, requestCount);
     
