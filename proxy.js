@@ -232,6 +232,20 @@ app.post("/", async (req, res) => {
     return;
   }
   
+  // Block eth_getLogs - too resource-intensive to proxy
+  {
+    const requests = Array.isArray(req.body) ? req.body : [req.body];
+    const hasGetLogs = requests.some(r => r?.method === 'eth_getLogs');
+    if (hasGetLogs) {
+      const requestId = Array.isArray(req.body) ? (req.body[0]?.id ?? null) : (req.body?.id ?? null);
+      console.log(`🚫 Blocked eth_getLogs from ${clientIP}`);
+      res.status(429)
+        .set('Retry-After', String(getSecondsUntilNextHour()))
+        .json(buildRateLimitResponse(requestId));
+      return;
+    }
+  }
+
   // Check rate limit before any other processing
   const rateLimitResult = checkRateLimit(clientIP, origin);
   if (rateLimitResult.limited) {
@@ -295,12 +309,18 @@ app.post("/", async (req, res) => {
     if (isUsingFallback) {
       // Circuit breaker says use fallback - use consistent fallback function
       response = await makeFallbackRequest(req.body, req.headers);
-      console.log("POST RESPONSE", response.data, "(FALLBACK)");
+      const fallbackLogData = response.data && typeof response.data.result === 'string' && response.data.result.length > 64
+        ? { ...response.data, result: response.data.result.slice(0, 64) + '...' }
+        : response.data;
+      console.log("POST RESPONSE", fallbackLogData, "(FALLBACK)");
     } else {
       // Try primary first
       try {
         response = await makePrimaryRequest('post', currentUrl, req.body, req.headers);
-        console.log("POST RESPONSE", response.data, "(PRIMARY)");
+        const primaryLogData = response.data && typeof response.data.result === 'string' && response.data.result.length > 64
+          ? { ...response.data, result: response.data.result.slice(0, 64) + '...' }
+          : response.data;
+        console.log("POST RESPONSE", primaryLogData, "(PRIMARY)");
       } catch (primaryError) {
         console.log("POST ERROR", primaryError.message, "(PRIMARY)");
         
@@ -398,7 +418,10 @@ app.post("/", async (req, res) => {
     });
   }
 
-  console.log("POST SERVED", req.body);
+  const bodyForLog = Array.isArray(req.body)
+    ? req.body.map(({ params: _, ...rest }) => rest)
+    : (req.body ? (({ params: _, ...rest }) => rest)(req.body) : req.body);
+  console.log("POST SERVED", bodyForLog);
 });
 
 app.get("/", async (req, res) => {
