@@ -1,0 +1,25 @@
+# IP Blacklist
+# =============
+# Add one IP address per line to block all requests from that IP.
+# Blocked IPs will receive a rate limit error response.
+#
+# Format:
+#   - One IP per line
+#   - Lines starting with # are comments
+#   - Empty lines are ignored
+#   - Supports both IPv4 and IPv6 addresses
+#   - Inline comments are supported (e.g., 1.2.3.4 # some attacker)
+#
+# The file is automatically reloaded when changed (no restart required).
+#
+# Usage:
+#   1. Copy this file to ip_blacklist.txt
+#   2. Add IPs you want to block
+#   3. The proxy will automatically pick up changes
+#
+# Examples:
+# 192.168.1.100
+# 10.0.0.50 # internal test machine
+# 2001:db8::1
+#
+# Add blacklisted IPs below this line:

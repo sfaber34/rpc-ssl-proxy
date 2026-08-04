@@ -51,6 +51,15 @@ let originMergeFunctionExists = null;
 // This prevents errors if the migration hasn't been run yet
 let originsLastHourEnabled = null;
 
+// Flag to track if sliding window columns exist (requests_previous_hour, origins_previous_hour)
+let slidingWindowEnabled = null;
+
+// Flag to track if daily limit columns exist (requests_today, origins_today, last_day_reset_timestamp)
+let dailyLimitEnabled = null;
+
+// Store the last daily reset time in memory (will be synced from DB)
+let lastDailyReset = null;
+
 // Store the last cleanup time to run cleanup once per day
 let lastCleanupTimestamp = null;
 
@@ -162,6 +171,87 @@ async function checkOriginsLastHourSupport() {
     originsLastHourEnabled = false;
     return false;
   }
+}
+
+// Check if sliding window columns exist (requests_previous_hour, origins_previous_hour)
+// These columns enable the sliding window rate limit approximation
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
+async function checkSlidingWindowSupport() {
+  if (slidingWindowEnabled !== null) {
+    return slidingWindowEnabled; // Already checked
+  }
+  
+  try {
+    const pool = await getPool();
+    const result = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'ip_table' 
+      AND column_name IN ('requests_previous_hour', 'origins_previous_hour')
+    `);
+    
+    slidingWindowEnabled = result.rows.length === 2;
+    
+    if (slidingWindowEnabled) {
+      console.log('✅ Sliding window columns detected - sliding window rate limiting enabled');
+    } else {
+      console.log('⚠️  Sliding window columns not found - using fixed window rate limiting');
+      console.log('   Run: node database_scripts/addSlidingWindowColumns.js to enable sliding window');
+    }
+    
+    return slidingWindowEnabled;
+  } catch (error) {
+    console.error('⚠️  Could not check for sliding window columns (non-fatal):', error.message);
+    slidingWindowEnabled = false;
+    return false;
+  }
+}
+
+// Check if daily limit columns exist (requests_today, origins_today, last_day_reset_timestamp)
+// These columns enable daily rate limiting as a secondary protection
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
+async function checkDailyLimitSupport() {
+  if (dailyLimitEnabled !== null) {
+    return dailyLimitEnabled; // Already checked
+  }
+  
+  try {
+    const pool = await getPool();
+    const result = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'ip_table' 
+      AND column_name IN ('requests_today', 'origins_today', 'last_day_reset_timestamp')
+    `);
+    
+    dailyLimitEnabled = result.rows.length === 3;
+    
+    if (dailyLimitEnabled) {
+      console.log('✅ Daily limit columns detected - daily rate limiting enabled');
+    } else {
+      console.log('⚠️  Daily limit columns not found - daily rate limiting disabled');
+      console.log('   Run: node database_scripts/addDailyLimitColumns.js to enable daily limits');
+    }
+    
+    return dailyLimitEnabled;
+  } catch (error) {
+    console.error('⚠️  Could not check for daily limit columns (non-fatal):', error.message);
+    dailyLimitEnabled = false;
+    return false;
+  }
+}
+
+// Helper function to get the start of the current day in UTC (midnight)
+// Returns Unix timestamp in seconds
+function getStartOfCurrentDay(timestamp) {
+  return Math.floor(timestamp / 86400) * 86400;
+}
+
+// Helper function to check if we're in a different day than the reset timestamp
+function isNewDay(currentTimestamp, lastResetTimestamp) {
+  const currentDay = getStartOfCurrentDay(currentTimestamp);
+  const resetDay = getStartOfCurrentDay(lastResetTimestamp);
+  return currentDay > resetDay;
 }
 
 // Capture hourly snapshot to ip_history_table before resetting counters
@@ -345,6 +435,8 @@ async function resetMonthlyCounters() {
 }
 
 // Reset all IPs' hourly counters every hour (aligned to clock hour boundaries)
+// With sliding window support, this SHIFTS current hour data to previous hour before resetting
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
 async function resetHourlyCounters() {
   try {
     const currentTimestamp = getCurrentUTCTimestamp();
@@ -382,13 +474,62 @@ async function resetHourlyCounters() {
       // Use lastGlobalReset as the hour_timestamp (the hour that just completed)
       await captureHourlySnapshot(lastGlobalReset);
       
-      // STEP 2: Reset the hourly counters
-      // Set last_reset_timestamp to the start of the current hour
-      // Also reset origins_last_hour if that column exists
+      // STEP 2: Shift current hour data to previous hour, then reset current hour
+      // This enables the sliding window rate limit approximation
       const hasOriginsLastHour = await checkOriginsLastHourSupport();
+      const hasSlidingWindow = await checkSlidingWindowSupport();
       
       let resetQuery, result;
-      if (hasOriginsLastHour) {
+      
+      if (hasSlidingWindow && hasOriginsLastHour) {
+        // Full sliding window support: shift all data
+        // If more than 1 hour passed, previous hour data becomes 0 (stale)
+        if (hoursPassed > 1) {
+          resetQuery = `
+            UPDATE ip_table 
+            SET requests_previous_hour = 0,
+                origins_previous_hour = '{}'::jsonb,
+                requests_last_hour = 0, 
+                origins_last_hour = '{}'::jsonb,
+                last_reset_timestamp = $1
+          `;
+          console.log(`   (${hoursPassed.toFixed(0)} hours gap - clearing previous hour data too)`);
+        } else {
+          resetQuery = `
+            UPDATE ip_table 
+            SET requests_previous_hour = requests_last_hour,
+                origins_previous_hour = COALESCE(origins_last_hour, '{}'::jsonb),
+                requests_last_hour = 0, 
+                origins_last_hour = '{}'::jsonb,
+                last_reset_timestamp = $1
+          `;
+        }
+        result = await pool.query(resetQuery, [currentHourStart]);
+        console.log(`✅ Hourly reset with sliding window shift - ${result.rowCount} IPs updated at ${new Date(currentHourStart * 1000).toISOString()}`);
+        
+      } else if (hasSlidingWindow) {
+        // Sliding window for IP counts only (no origins_last_hour column)
+        if (hoursPassed > 1) {
+          resetQuery = `
+            UPDATE ip_table 
+            SET requests_previous_hour = 0,
+                origins_previous_hour = '{}'::jsonb,
+                requests_last_hour = 0,
+                last_reset_timestamp = $1
+          `;
+        } else {
+          resetQuery = `
+            UPDATE ip_table 
+            SET requests_previous_hour = requests_last_hour,
+                requests_last_hour = 0,
+                last_reset_timestamp = $1
+          `;
+        }
+        result = await pool.query(resetQuery, [currentHourStart]);
+        console.log(`✅ Hourly reset with sliding window shift (IP only) - ${result.rowCount} IPs at ${new Date(currentHourStart * 1000).toISOString()}`);
+        
+      } else if (hasOriginsLastHour) {
+        // Legacy: origins_last_hour but no sliding window
         resetQuery = `
           UPDATE ip_table 
           SET requests_last_hour = 0, 
@@ -396,11 +537,13 @@ async function resetHourlyCounters() {
               last_reset_timestamp = $1
         `;
         result = await pool.query(resetQuery, [currentHourStart]);
-        console.log(`✅ Global hourly reset completed - Reset ${result.rowCount} IPs (requests_last_hour and origins_last_hour) to hour starting at ${new Date(currentHourStart * 1000).toISOString()}`);
+        console.log(`✅ Hourly reset (fixed window) - ${result.rowCount} IPs at ${new Date(currentHourStart * 1000).toISOString()}`);
+        
       } else {
+        // Most basic: no origins_last_hour, no sliding window
         resetQuery = 'UPDATE ip_table SET requests_last_hour = 0, last_reset_timestamp = $1';
         result = await pool.query(resetQuery, [currentHourStart]);
-        console.log(`✅ Global hourly reset completed - Reset ${result.rowCount} IPs to hour starting at ${new Date(currentHourStart * 1000).toISOString()}`);
+        console.log(`✅ Hourly reset (basic) - ${result.rowCount} IPs at ${new Date(currentHourStart * 1000).toISOString()}`);
       }
       
       lastGlobalReset = currentHourStart;
@@ -409,9 +552,70 @@ async function resetHourlyCounters() {
       await cleanupOldHistory();
     }
   } catch (error) {
-    console.error('❌ Error during global hourly reset:', error);
+    // CRITICAL: Catch all errors to prevent crashing the main proxy
+    console.error('⚠️  Error during hourly reset (non-fatal, continuing):', error.message);
     // Reset lastGlobalReset so we retry fetching from DB next time
     lastGlobalReset = null;
+    // Do NOT throw - we want the main proxy to continue running
+  }
+}
+
+// Reset all IPs' daily counters when crossing into a new UTC day
+// CRITICAL: This function MUST NOT throw errors - wrapped in try-catch to protect main proxy
+async function resetDailyCounters() {
+  try {
+    // Check if daily limit tracking is supported before attempting reset
+    const isSupported = await checkDailyLimitSupport();
+    if (!isSupported) {
+      return; // Silently skip if columns don't exist
+    }
+    
+    const currentTimestamp = getCurrentUTCTimestamp();
+    const currentDayStart = getStartOfCurrentDay(currentTimestamp);
+    const pool = await getPool();
+    
+    // If we don't know the last daily reset time, get it from the database
+    if (lastDailyReset === null) {
+      const result = await pool.query(
+        'SELECT MIN(last_day_reset_timestamp) as last_reset FROM ip_table'
+      );
+      
+      if (result.rows.length > 0 && result.rows[0].last_reset) {
+        lastDailyReset = parseInt(result.rows[0].last_reset);
+        console.log(`📅 Synced last daily reset from database: ${new Date(lastDailyReset * 1000).toISOString()}`);
+      } else {
+        // No IPs in database yet, initialize to start of current day
+        lastDailyReset = currentDayStart;
+        console.log(`📅 No previous daily reset found, initializing to: ${new Date(lastDailyReset * 1000).toISOString()}`);
+      }
+    }
+    
+    // Check if we've crossed into a new day boundary
+    if (isNewDay(currentTimestamp, lastDailyReset)) {
+      const lastDayDate = new Date(lastDailyReset * 1000);
+      const currentDayDate = new Date(currentDayStart * 1000);
+      
+      console.log(`📆 Day boundary crossed!`);
+      console.log(`   Last reset: ${lastDayDate.toISOString().substring(0, 10)}`);
+      console.log(`   Current day: ${currentDayDate.toISOString().substring(0, 10)}`);
+      
+      // Reset the daily counters
+      const result = await pool.query(`
+        UPDATE ip_table 
+        SET requests_today = 0, 
+            origins_today = '{}'::jsonb,
+            last_day_reset_timestamp = $1
+      `, [currentDayStart]);
+      
+      lastDailyReset = currentDayStart;
+      console.log(`✅ Daily reset completed - Reset ${result.rowCount} IPs for day starting at ${currentDayDate.toISOString()}`);
+    }
+  } catch (error) {
+    // CRITICAL: Catch all errors to prevent crashing the main proxy
+    console.error('⚠️  Error during daily reset (non-fatal, continuing):', error.message);
+    // Reset lastDailyReset so we retry fetching from DB next time
+    lastDailyReset = null;
+    // Do NOT throw - we want the main proxy to continue running
   }
 }
 
@@ -422,7 +626,8 @@ async function updateRDSWithIpRequests(ipCountMap) {
     // Always check if we need to do resets, even if no new requests
     // This ensures resets happen on schedule regardless of traffic
     await resetMonthlyCounters();  // Check monthly reset first (less frequent)
-    await resetHourlyCounters();   // Then check hourly reset
+    await resetDailyCounters();    // Check daily reset
+    await resetHourlyCounters();   // Then check hourly reset (most frequent)
     
     const hasNewRequests = Object.keys(ipCountMap).length > 0;
 
@@ -448,6 +653,9 @@ async function updateRDSWithIpRequests(ipCountMap) {
       
       // Check if origins_last_hour column exists (only once per update batch)
       const hasOriginsLastHour = await checkOriginsLastHourSupport();
+      
+      // Check if daily limit columns exist (only once per update batch)
+      const hasDailyLimit = await checkDailyLimitSupport();
 
       for (const ip in ipCountMap) {
         const ipData = ipCountMap[ip];
@@ -671,6 +879,30 @@ async function updateRDSWithIpRequests(ipCountMap) {
 
           const result = await client.query(query, values);
           const row = result.rows[0];
+          
+          // Update daily counters if that feature is enabled
+          // This is done as a separate update to avoid making the main upsert query even more complex
+          if (hasDailyLimit) {
+            try {
+              const dailyQuery = hasOriginMergeFunction 
+                ? `
+                  UPDATE ip_table 
+                  SET requests_today = requests_today + $2,
+                      origins_today = jsonb_merge_add_numeric(COALESCE(origins_today, '{}'::jsonb), $3::jsonb)
+                  WHERE ip = $1
+                `
+                : `
+                  UPDATE ip_table 
+                  SET requests_today = requests_today + $2,
+                      origins_today = COALESCE(origins_today, '{}'::jsonb) || $3::jsonb
+                  WHERE ip = $1
+                `;
+              await client.query(dailyQuery, [ip, requestCount, JSON.stringify(origins)]);
+            } catch (dailyError) {
+              // Non-fatal - log and continue (daily tracking is optional enhancement)
+              console.error(`⚠️  Failed to update daily counters for IP ${ip}:`, dailyError.message);
+            }
+          }
 
           // Log with or without monthly tracking data
           if (hasMonthlyTracking) {

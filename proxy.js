@@ -10,6 +10,11 @@ import sslRootCas from "ssl-root-cas";
 import dotenv from "dotenv";
 import { updateUrlCountMap, updateIpCountMap, startBackgroundTasks } from './utils/backgroundTasks.js';
 import { CircuitBreaker } from './utils/circuitBreaker.js';
+import { checkRateLimit, buildRateLimitResponse, getRateLimitStatus, startRateLimitPolling, getSecondsUntilNextHour } from './utils/rateLimiter.js';
+import { validateRpcRequest } from './utils/requestValidator.js';
+import { isIPBlacklisted, startWatchingBlacklist, getBlacklistStatus } from './utils/ipBlacklist.js';
+import { requireAdminKey } from './utils/adminAuth.js';
+import { defaultRequestCount, methodRequestCounts } from './config.js';
 
 var app = express();
 https.globalAgent.options.ca = sslRootCas.create();
@@ -33,11 +38,14 @@ const circuitBreaker = new CircuitBreaker({
   fallbackUrl: fallbackUrl,
   failureThreshold: 2, // Switch to fallback after 2 consecutive failures
   resetTimeout: 60000, // Try primary again after 60 seconds
-  requestTimeout: 10000 // 10 second timeout
+  requestTimeout: 15000 // 15 second timeout
 });
 
 app.use(bodyParser.json());
 app.use(cors());
+
+// Validate RPC requests early to avoid forwarding invalid requests to downstream service
+app.use(validateRpcRequest);
 
 var last = "";
 
@@ -158,7 +166,7 @@ async function makeFallbackRequest(data, headers) {
 }
 
 // Helper function to make primary requests with circuit breaker
-async function makePrimaryRequest(method, url, data, headers, timeout = 10000) {
+async function makePrimaryRequest(method, url, data, headers, timeout = 15000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   
@@ -200,6 +208,65 @@ async function makePrimaryRequest(method, url, data, headers, timeout = 10000) {
 }
 
 app.post("/", async (req, res) => {
+  const clientIP = getClientIP(req);
+  const origin = req.headers.origin;
+  
+  // Check IP blacklist FIRST before any other processing
+  if (isIPBlacklisted(clientIP)) {
+    console.log(`🚫 Blacklisted IP blocked: ${clientIP}`);
+    
+    // Extract request ID from body (handle both single and batch requests)
+    let requestId = null;
+    if (req.body) {
+      if (Array.isArray(req.body) && req.body.length > 0) {
+        requestId = req.body[0]?.id ?? null;
+      } else {
+        requestId = req.body?.id ?? null;
+      }
+    }
+    
+    // Return the same rate limit error for blacklisted IPs
+    res.status(429)
+      .set('Retry-After', '3600') // 1 hour
+      .json(buildRateLimitResponse(requestId));
+    return;
+  }
+  
+  // Block eth_getLogs - too resource-intensive to proxy
+  {
+    const requests = Array.isArray(req.body) ? req.body : [req.body];
+    const hasGetLogs = requests.some(r => r?.method === 'eth_getLogs');
+    if (hasGetLogs) {
+      const requestId = Array.isArray(req.body) ? (req.body[0]?.id ?? null) : (req.body?.id ?? null);
+      console.log(`🚫 Blocked eth_getLogs from ${clientIP}`);
+      res.status(429)
+        .set('Retry-After', String(getSecondsUntilNextHour()))
+        .json(buildRateLimitResponse(requestId));
+      return;
+    }
+  }
+
+  // Check rate limit before any other processing
+  const rateLimitResult = checkRateLimit(clientIP, origin);
+  if (rateLimitResult.limited) {
+    console.log(`🚫 Rate limited: ${rateLimitResult.reason}`);
+    
+    // Extract request ID from body (handle both single and batch requests)
+    let requestId = null;
+    if (req.body) {
+      if (Array.isArray(req.body) && req.body.length > 0) {
+        requestId = req.body[0]?.id ?? null;
+      } else {
+        requestId = req.body?.id ?? null;
+      }
+    }
+    
+    res.status(429)
+      .set('Retry-After', String(rateLimitResult.retryAfter || getSecondsUntilNextHour()))
+      .json(buildRateLimitResponse(requestId));
+    return;
+  }
+  
   const isUsingFallback = circuitBreaker.isCurrentlyUsingFallback();
   const currentUrl = circuitBreaker.getCurrentUrl();
   
@@ -283,13 +350,17 @@ app.post("/", async (req, res) => {
 
   // Only count requests in Firebase if we successfully used primary URL (not fallback)
   if (!actuallyUsedFallback && responseData && req.headers) {
-    // Count requests properly for batch requests
-    let requestCount = 1;
-    if (Array.isArray(req.body)) {
-      requestCount = req.body.length;
-      console.log(`Batch request detected with ${requestCount} requests`);
+    // Weighted request count for rate limiting (heavy methods count for more)
+    const requests = Array.isArray(req.body) ? req.body : [req.body];
+    const requestCount = requests.reduce((sum, r) => {
+      if (!r || typeof r.method !== 'string') return sum + defaultRequestCount;
+      const weight = methodRequestCounts[r.method] ?? defaultRequestCount;
+      return sum + weight;
+    }, 0);
+    if (requests.length > 1 || requestCount !== requests.length) {
+      console.log(`Request count: ${requests.length} call(s) → ${requestCount} weighted unit(s)`);
     }
-    
+
     // Always track IP counts (even without origin)
     updateIpCountMap(getClientIP(req), req.headers.origin, requestCount);
     
@@ -343,7 +414,10 @@ app.post("/", async (req, res) => {
     });
   }
 
-  console.log("POST SERVED", req.body);
+  const bodyForLog = Array.isArray(req.body)
+    ? req.body.map(({ params: _, ...rest }) => rest)
+    : (req.body ? (({ params: _, ...rest }) => rest)(req.body) : req.body);
+  console.log("POST SERVED", bodyForLog);
 });
 
 app.get("/", async (req, res) => {
@@ -504,8 +578,42 @@ app.get("/status", (req, res) => {
   }
 });
 
+// Rate limit status endpoint (for monitoring) - protected by API key
+app.get("/ratelimitstatus", requireAdminKey, (req, res) => {
+  try {
+    const status = getRateLimitStatus();
+    res.json({
+      ...status,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("/ratelimitstatus error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// IP blacklist status endpoint (for monitoring) - protected by API key
+app.get("/blackliststatus", requireAdminKey, (req, res) => {
+  try {
+    const status = getBlacklistStatus();
+    res.json({
+      ...status,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("/blackliststatus error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Start background tasks
 startBackgroundTasks();
+
+// Start rate limit polling
+startRateLimitPolling();
+
+// Start IP blacklist watcher
+startWatchingBlacklist();
 
 let key, cert;
 try {
