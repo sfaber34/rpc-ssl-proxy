@@ -52,6 +52,19 @@ function isLocalOrigin(origin) {
   const cleaned = stripProtocol(origin).toLowerCase();
   if (!cleaned) return true;
   
+  // Non-web origins are NOT real origins. Browser extensions (e.g. MetaMask's
+  // chrome-extension://...), file:// pages, and any value that still carries a
+  // scheme or port after http(s) stripping are filtered out of origin tracking
+  // by filterOrigins() (utils/originValidator.js), so their traffic is recorded
+  // in the no-origin (IP) bucket. Enforcement MUST classify them identically:
+  // if we treated them as a "real origin" here, the request would be counted in
+  // the IP bucket but routed to the origin bucket for enforcement and would
+  // escape BOTH the IP limit and the origin limit.
+  // IMPORTANT: keep this consistent with originValidator.isLocalOrigin().
+  if (cleaned.includes('extension://')) return true;
+  if (cleaned.startsWith('file://')) return true;
+  if (cleaned.includes(':')) return true; // leftover scheme (non-http) or explicit port
+
   // Treat these as "no origin" for rate limiting purposes
   if (cleaned.includes('localhost')) return true;
   if (cleaned.startsWith('127.0.0.1')) return true;
