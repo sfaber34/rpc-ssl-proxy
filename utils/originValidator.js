@@ -21,6 +21,33 @@ const stats = {
 };
 
 /**
+ * Canonicalize an origin into the single key used for BOTH storage and enforcement.
+ *
+ * Strips the http(s) scheme (case-insensitively) and any trailing slash, then lowercases.
+ *
+ * Every place that turns an origin into a counter key or compares one MUST go through
+ * this function. Origins are case-insensitive per DNS, but JSONB keys and JS Set/Map
+ * lookups are not: if one call site lowercases and another does not, a single origin
+ * fragments into many independent counters, each receiving its own full rate limit.
+ * Rotating capitalization would then multiply an attacker's allowance without bound.
+ *
+ * @param {string} origin - Raw origin header value
+ * @returns {string} - Canonical key, or '' if unusable
+ */
+function normalizeOrigin(origin) {
+  try {
+    if (!origin || typeof origin !== 'string') return '';
+    return origin
+      .trim()
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/$/, '')
+      .toLowerCase();
+  } catch (error) {
+    return '';
+  }
+}
+
+/**
  * Check if an origin is a local/test origin (should be filtered out)
  * 
  * Returns true if origin should be FILTERED (is local)
@@ -295,6 +322,7 @@ function testOrigin(origin) {
 }
 
 export {
+  normalizeOrigin,
   isLocalOrigin,
   filterOrigins,
   getStats,

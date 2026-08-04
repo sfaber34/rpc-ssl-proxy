@@ -1,4 +1,5 @@
 import { getPool } from './postgresClient.js';
+import { isLocalOrigin as isUntrackedOrigin, normalizeOrigin } from './originValidator.js';
 import { 
   originRateLimitPerHour, 
   ipRateLimitPerHour, 
@@ -39,41 +40,32 @@ const state = {
   dailyLimitExists: null
 };
 
-// Strip protocol from origin for consistent comparison
-function stripProtocol(url) {
-  if (!url) return '';
-  if (typeof url !== 'string') return '';
-  return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+// Origins that bypass rate limiting entirely.
+// updateIpCountMap() (utils/backgroundTasks.js) returns early for these, so no counter
+// ever accumulates for them. There is therefore nothing to enforce against, and routing
+// them to the IP bucket would limit them using a count that excludes their own traffic.
+// Anything added here MUST also be skipped by updateIpCountMap().
+const EXEMPT_ORIGINS = new Set(['buidlguidl-client']);
+
+function isExemptOrigin(origin) {
+  if (!origin || typeof origin !== 'string') return false;
+  return EXEMPT_ORIGINS.has(normalizeOrigin(origin));
 }
 
-// Check if an origin looks like a local/test origin (should be treated as "no origin")
+// Decide whether an origin is real (enforce in the origin bucket) or not
+// (enforce in the no-origin IP bucket).
+//
+// This MUST agree with originValidator.isLocalOrigin(), which decides whether the origin
+// is recorded in the database at all. An origin that is never recorded accumulates no
+// counts, so enforcing against it can never trip: the request escapes the origin limit,
+// and because enforcement took the origin branch it never consults the IP limit either.
+// That gap is why `Origin: *` was able to bypass both buckets. Delegating to the same
+// function keeps accounting and enforcement in lockstep by construction.
 function isLocalOrigin(origin) {
   if (!origin || origin === 'unknown') return true;
-  const cleaned = stripProtocol(origin).toLowerCase();
+  const cleaned = normalizeOrigin(origin);
   if (!cleaned) return true;
-  
-  // Non-web origins are NOT real origins. Browser extensions (e.g. MetaMask's
-  // chrome-extension://...), file:// pages, and any value that still carries a
-  // scheme or port after http(s) stripping are filtered out of origin tracking
-  // by filterOrigins() (utils/originValidator.js), so their traffic is recorded
-  // in the no-origin (IP) bucket. Enforcement MUST classify them identically:
-  // if we treated them as a "real origin" here, the request would be counted in
-  // the IP bucket but routed to the origin bucket for enforcement and would
-  // escape BOTH the IP limit and the origin limit.
-  // IMPORTANT: keep this consistent with originValidator.isLocalOrigin().
-  if (cleaned.includes('extension://')) return true;
-  if (cleaned.startsWith('file://')) return true;
-  if (cleaned.includes(':')) return true; // leftover scheme (non-http) or explicit port
-
-  // Treat these as "no origin" for rate limiting purposes
-  if (cleaned.includes('localhost')) return true;
-  if (cleaned.startsWith('127.0.0.1')) return true;
-  if (cleaned.startsWith('0.0.0.0')) return true;
-  if (cleaned.startsWith('192.168.')) return true;
-  if (cleaned.startsWith('10.')) return true;
-  if (cleaned === 'null') return true;
-  
-  return false;
+  return isUntrackedOrigin(cleaned);
 }
 
 /**
@@ -218,22 +210,24 @@ async function pollRateLimitData() {
       // Sliding window: effective_count = current_hour + (previous_hour × weight)
       // Query ALL origins/IPs with any hourly activity, determine blocking in code
       
+      // LOWER() so that historical mixed-case keys already stored in JSONB collapse into
+      // one counter. Without it, each casing variant gets its own full rate limit.
       originsQuery = `
         WITH current_hour AS (
           SELECT 
-            origin_key as origin,
+            LOWER(origin_key) as origin,
             SUM((origin_value)::bigint) as current_requests
           FROM ip_table, 
                jsonb_each_text(COALESCE(${originColumn}, '{}'::jsonb)) AS x(origin_key, origin_value)
-          GROUP BY origin_key
+          GROUP BY LOWER(origin_key)
         ),
         previous_hour AS (
           SELECT 
-            origin_key as origin,
+            LOWER(origin_key) as origin,
             SUM((origin_value)::bigint) as previous_requests
           FROM ip_table, 
                jsonb_each_text(COALESCE(origins_previous_hour, '{}'::jsonb)) AS x(origin_key, origin_value)
-          GROUP BY origin_key
+          GROUP BY LOWER(origin_key)
         )
         SELECT 
           COALESCE(c.origin, p.origin) as origin,
@@ -269,13 +263,13 @@ async function pollRateLimitData() {
       // Fixed window (legacy behavior) - query ALL with any activity
       originsQuery = `
         SELECT 
-          origin_key as origin,
+          LOWER(origin_key) as origin,
           SUM((origin_value)::bigint) as current_requests,
           0 as previous_requests,
           SUM((origin_value)::bigint) as effective_requests
         FROM ip_table, 
              jsonb_each_text(COALESCE(${originColumn}, '{}'::jsonb)) AS x(origin_key, origin_value)
-        GROUP BY origin_key
+        GROUP BY LOWER(origin_key)
         ORDER BY effective_requests DESC
         LIMIT ${QUERY_LIMIT}
       `;
@@ -309,7 +303,7 @@ async function pollRateLimitData() {
     const newOriginEffective = new Map();
     
     for (const row of originsResult.rows) {
-      const cleanOrigin = stripProtocol(row.origin);
+      const cleanOrigin = normalizeOrigin(row.origin);
       if (cleanOrigin && !isLocalOrigin(cleanOrigin)) {
         const currentHour = parseInt(row.current_requests) || 0;
         const previousHour = parseInt(row.previous_requests) || 0;
@@ -373,11 +367,11 @@ async function pollRateLimitData() {
       // We need all counts for status display, then determine blocking separately
       const dailyOriginsQuery = `
         SELECT 
-          origin_key as origin,
+          LOWER(origin_key) as origin,
           SUM((origin_value)::bigint) as total_requests
         FROM ip_table, 
              jsonb_each_text(COALESCE(origins_today, '{}'::jsonb)) AS x(origin_key, origin_value)
-        GROUP BY origin_key
+        GROUP BY LOWER(origin_key)
         ORDER BY total_requests DESC
         LIMIT ${QUERY_LIMIT}
       `;
@@ -385,7 +379,7 @@ async function pollRateLimitData() {
       const dailyOriginsResult = await pool.query(dailyOriginsQuery);
       
       for (const row of dailyOriginsResult.rows) {
-        const cleanOrigin = stripProtocol(row.origin);
+        const cleanOrigin = normalizeOrigin(row.origin);
         if (cleanOrigin && !isLocalOrigin(cleanOrigin)) {
           const dailyCount = parseInt(row.total_requests);
           newOriginDailyCounts.set(cleanOrigin, dailyCount);
@@ -496,7 +490,12 @@ async function pollRateLimitData() {
  */
 function checkRateLimit(ip, origin) {
   try {
-    const cleanOrigin = stripProtocol(origin);
+    // Exempt origins are never counted and never limited (see EXEMPT_ORIGINS)
+    if (isExemptOrigin(origin)) {
+      return { limited: false, reason: null, retryAfter: null };
+    }
+
+    const cleanOrigin = normalizeOrigin(origin);
     const hasRealOrigin = cleanOrigin && !isLocalOrigin(cleanOrigin);
 
     if (hasRealOrigin) {
@@ -744,5 +743,9 @@ export {
   buildRateLimitResponse,
   getRateLimitStatus,
   startRateLimitPolling,
-  getSecondsUntilNextHour
+  getSecondsUntilNextHour,
+  // Exported for testOriginClassifier.js, which asserts that enforcement and
+  // accounting classify every origin identically.
+  isLocalOrigin,
+  isExemptOrigin
 };

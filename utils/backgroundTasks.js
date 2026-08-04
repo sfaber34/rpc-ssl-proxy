@@ -1,6 +1,7 @@
 import { updateFirebaseWithNewRequests } from './updateFirebaseWithNewRequests.js';
 import { updateRDSWithIpRequests } from './updateRDSWithIpRequests.js';
 import { transferFirebaseRequestsToFunded } from './transferFirebaseRequestsToFunded.js';
+import { normalizeOrigin } from './originValidator.js';
 import { backgroundTasksInterval } from '../config.js';
 
 // Shared state object
@@ -11,24 +12,13 @@ const state = {
   updateCounter: 0
 };
 
-// Function to strip protocol from URL
-function stripProtocol(url) {
-  if (!url) return '';
-  // Ensure url is a string
-  if (typeof url !== 'string') {
-    console.warn(`stripProtocol received non-string: ${typeof url}`);
-    return '';
-  }
-  return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-}
-
 // Function to safely update the urlCountMap
 function updateUrlCountMap(origin, count = 1) {
   try {
     if (!origin) return;
     
-    // Strip protocol from origin
-    const cleanOrigin = stripProtocol(origin);
+    // Canonical key shared with rate limit enforcement (see originValidator.normalizeOrigin)
+    const cleanOrigin = normalizeOrigin(origin);
     
     // Skip localhost URLs (localhost:3000, localhost:3001, etc.)
     if (cleanOrigin.includes('localhost')) {
@@ -73,8 +63,9 @@ function updateIpCountMap(ip, origin, count = 1) {
     }
     
     // Skip IPs from buidlguidl-client origin
+    // Must stay in sync with EXEMPT_ORIGINS in utils/rateLimiter.js
     if (origin) {
-      const cleanOrigin = stripProtocol(origin);
+      const cleanOrigin = normalizeOrigin(origin);
       if (cleanOrigin === 'buidlguidl-client') {
         console.log(`Skipping IP tracking for buidlguidl-client origin: ${ip}`);
         return;
@@ -94,10 +85,10 @@ function updateIpCountMap(ip, origin, count = 1) {
     
     // Update origin count for this IP
     if (origin && origin !== 'unknown') {
-      // Clean the origin (strip protocol and trailing slash)
-      const cleanOrigin = stripProtocol(origin);
+      // Canonical key shared with rate limit enforcement (see originValidator.normalizeOrigin)
+      const cleanOrigin = normalizeOrigin(origin);
       
-      // Skip empty origins (from stripProtocol errors)
+      // Skip empty origins (from normalizeOrigin errors)
       if (!cleanOrigin) {
         return;
       }
