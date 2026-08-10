@@ -1,5 +1,5 @@
 /**
- * Guards two invariants that rate limiting depends on.
+ * Guards three invariants that rate limiting depends on.
  *
  * INVARIANT 1 - Accounting and enforcement must pick the same bucket.
  *   An origin that accounting refuses to record accumulates no counts. If enforcement
@@ -12,6 +12,11 @@
  *   If capitalization survives into the key, one origin fragments into many independent
  *   counters, each granted its own full rate limit.
  *
+ * INVARIANT 3 - The exempt origin cannot be borrowed for arbitrary methods.
+ *   The Origin header is caller-supplied, so the EXEMPT bucket is available to anyone who
+ *   copies it. Requests claiming that origin are restricted to the methods it actually uses,
+ *   so the free pass cannot be turned into unlimited access to the rest of the RPC surface.
+ *
  * Buckets:
  *   ORIGIN - counted per deployed app, aggregated across all IPs (higher limit)
  *   IP     - counted per IP as no-origin traffic (lower limit)
@@ -21,7 +26,7 @@
  */
 
 import { isLocalOrigin as validatorIsLocalOrigin, normalizeOrigin } from './utils/originValidator.js';
-import { isLocalOrigin, isExemptOrigin } from './utils/rateLimiter.js';
+import { isLocalOrigin, isExemptOrigin, isExemptOriginMethod } from './utils/rateLimiter.js';
 
 /**
  * Models the ACCOUNTING path: backgroundTasks.updateIpCountMap() decides what gets
@@ -236,10 +241,82 @@ for (const [a, b] of DISTINCT_PAIRS) {
   }
 }
 
-const total = BUCKET_CASES.length + KEY_GROUPS.length;
+// ---------------------------------------------------------------------------
+// INVARIANT 3: the exempt origin only buys access to its own methods
+// ---------------------------------------------------------------------------
+
+/**
+ * Models the ADMISSION path: validateRpcRequest() (utils/requestValidator.js) rejects a
+ * request when isExemptOrigin() says the caller claims the free pass and
+ * isExemptOriginMethod() says the method is not one the exempt client issues.
+ *
+ *   SERVE      - exempt origin asking for something it legitimately asks for
+ *   REJECT     - exempt origin asking for anything else, i.e. a spoofed header
+ *   NOT_EXEMPT - ordinary traffic, admitted here and limited by the buckets above
+ */
+function admissionVerdict(origin, method) {
+  if (!isExemptOrigin(origin)) return 'NOT_EXEMPT';
+  return isExemptOriginMethod(method) ? 'SERVE' : 'REJECT';
+}
+
+// [origin, method, expectedVerdict, description]
+const ADMISSION_CASES = [
+  // --- The traffic the exemption exists for ---
+  ['buidlguidl-client', 'eth_blockNumber',        'SERVE',  'exempt client polling head'],
+  ['buidlguidl-client', 'eth_call',               'SERVE',  'exempt client reading state'],
+  ['BuidlGuidl-Client', 'eth_call',               'SERVE',  'casing does not lose the pass'],
+
+  // --- Spoofers: exempt header, methods the client never sends ---
+  ['buidlguidl-client', 'eth_getBalance',         'REJECT', 'spoofed header'],
+  ['buidlguidl-client', 'eth_getLogs',            'REJECT', 'spoofed header on a heavy method'],
+  ['buidlguidl-client', 'eth_sendRawTransaction', 'REJECT', 'spoofed header on a write'],
+  ['BUIDLGUIDL-CLIENT', 'eth_getBlockByNumber',   'REJECT', 'casing does not grant the pass'],
+  ['buidlguidl-client', 'net_version',            'REJECT', 'spoofed header, other namespace'],
+
+  // --- Method matching is exact: no casing or padding tricks ---
+  ['buidlguidl-client', 'ETH_CALL',               'REJECT', 'method names are case-sensitive'],
+  ['buidlguidl-client', ' eth_call',              'REJECT', 'leading whitespace'],
+  ['buidlguidl-client', 'eth_call2',              'REJECT', 'suffixed method name'],
+  ['buidlguidl-client', '',                       'REJECT', 'empty method'],
+  ['buidlguidl-client', undefined,                'REJECT', 'missing method'],
+
+  // --- Ordinary traffic is untouched by this check ---
+  ['https://speedrunethereum.com', 'eth_getBalance', 'NOT_EXEMPT', 'real origin, normal limits'],
+  ['buidlguidl-client.com',        'eth_getBalance', 'NOT_EXEMPT', 'lookalike domain is not exempt'],
+  [undefined,                      'eth_getBalance', 'NOT_EXEMPT', 'no origin, IP limits'],
+];
+
+const admissionRows = [];
+for (const [origin, method, expected, description] of ADMISSION_CASES) {
+  const verdict = admissionVerdict(origin, method);
+  const correct = verdict === expected;
+  if (!correct) failures++;
+
+  admissionRows.push({
+    origin: label(origin),
+    method: method === undefined ? '(undefined)' : method === '' ? '(blank)' : method,
+    verdict,
+    expected,
+    result: correct ? 'PASS' : 'FAIL',
+    description,
+  });
+}
+
+console.log('\nINVARIANT 3 - the exempt origin only buys access to its own methods\n');
+console.table(admissionRows);
+
+const admitted = admissionRows.filter(r => r.result === 'FAIL' && r.verdict !== 'REJECT' && r.expected === 'REJECT');
+if (admitted.length > 0) {
+  console.log('\nSPOOFING ADMITTED - these requests skip rate limiting on a forged header:');
+  for (const a of admitted) {
+    console.log(`  ${a.origin} + ${a.method}  (${a.description})`);
+  }
+}
+
+const total = BUCKET_CASES.length + KEY_GROUPS.length + ADMISSION_CASES.length;
 console.log(`\n${total - failures}/${total} checks passed`);
 if (failures > 0) {
   console.log(`FAILED: ${failures} check(s). Do not deploy.`);
   process.exit(1);
 }
-console.log('Both invariants hold.');
+console.log('All invariants hold.');

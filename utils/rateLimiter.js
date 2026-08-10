@@ -52,6 +52,23 @@ function isExemptOrigin(origin) {
   return EXEMPT_ORIGINS.has(normalizeOrigin(origin));
 }
 
+// The methods an exempt origin is permitted to call.
+//
+// The Origin header is caller-supplied and unverifiable, so the exemption above is available
+// to anyone willing to copy the header. It is kept no wider than the traffic it exists for:
+// the buidlguidl-client nodes serving this proxy only ever issue these two calls, so a request
+// carrying an exempt origin and any other method is spoofing to escape rate limiting.
+// validateRpcRequest() (utils/requestValidator.js) rejects those rather than serving them.
+//
+// Method names are case-sensitive in JSON-RPC, so this is an exact match: a node sending
+// `ETH_CALL` would be rejected upstream anyway.
+const EXEMPT_ORIGIN_METHODS = new Set(['eth_blockNumber', 'eth_call']);
+
+function isExemptOriginMethod(method) {
+  if (!method || typeof method !== 'string') return false;
+  return EXEMPT_ORIGIN_METHODS.has(method);
+}
+
 // Decide whether an origin is real (enforce in the origin bucket) or not
 // (enforce in the no-origin IP bucket).
 //
@@ -751,5 +768,7 @@ export {
   // Exported for testOriginClassifier.js, which asserts that enforcement and
   // accounting classify every origin identically.
   isLocalOrigin,
-  isExemptOrigin
+  isExemptOrigin,
+  isExemptOriginMethod,
+  EXEMPT_ORIGIN_METHODS
 };

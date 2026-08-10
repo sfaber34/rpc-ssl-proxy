@@ -11,6 +11,12 @@
  */
 
 import { logRejectedRequest } from './rejectLogger.js';
+import { isExemptOrigin, isExemptOriginMethod, EXEMPT_ORIGIN_METHODS } from './rateLimiter.js';
+
+// User-facing message for a request that claims a rate-limit-exempt origin but calls a
+// method that origin never uses. Built once so single and batch paths cannot drift.
+const EXEMPT_ORIGIN_METHOD_MESSAGE =
+  `Method not supported from this origin`;
 
 /**
  * Blocked RPC namespaces - these are dangerous or sensitive methods that should not be exposed
@@ -88,6 +94,12 @@ function validateRpcRequest(req, res, next) {
       return;
     }
 
+    // A request claiming an exempt origin gets a free pass on rate limiting, so it is held
+    // to the narrow set of methods that origin actually uses (see EXEMPT_ORIGIN_METHODS in
+    // utils/rateLimiter.js). Rejecting here, before the handler, means a spoofed request is
+    // never proxied and never reaches the accounting path.
+    const claimsExemptOrigin = isExemptOrigin(req.headers?.origin);
+
     // Reject empty, null, or non-object bodies
     if (!req.body || typeof req.body !== 'object') {
       console.log("‼️ Invalid Request: empty or invalid body");
@@ -155,6 +167,18 @@ function validateRpcRequest(req, res, next) {
             `batch[${i}]: blocked namespace '${blockedNamespace}' (method: ${method})`
           );
         }
+
+        // Exempt origin method validation
+        if (claimsExemptOrigin && !isExemptOriginMethod(method)) {
+          console.log(`🚫 Spoofed exempt origin in batch item ${i}: ${req.headers.origin} (method: ${method})`);
+          return sendErrorAndLog(
+            req, res,
+            -32601,
+            EXEMPT_ORIGIN_METHOD_MESSAGE,
+            id,
+            `batch[${i}]: spoofed exempt origin '${req.headers.origin}' (method: ${method})`
+          );
+        }
       }
       
       // Mark as batch request for the handler
@@ -201,7 +225,19 @@ function validateRpcRequest(req, res, next) {
         `blocked namespace '${blockedNamespace}' (method: ${method})`
       );
     }
-    
+
+    // Exempt origin method validation
+    if (claimsExemptOrigin && !isExemptOriginMethod(method)) {
+      console.log(`🚫 Spoofed exempt origin: ${req.headers.origin} (method: ${method})`);
+      return sendErrorAndLog(
+        req, res,
+        -32601,
+        EXEMPT_ORIGIN_METHOD_MESSAGE,
+        id,
+        `spoofed exempt origin '${req.headers.origin}' (method: ${method})`
+      );
+    }
+
     next();
   } catch (err) {
     // FAIL-OPEN: If validation itself fails, log and let the request through
