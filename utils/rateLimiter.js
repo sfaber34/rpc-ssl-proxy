@@ -504,7 +504,8 @@ function checkRateLimit(ip, origin) {
       // Check DAILY limit first (longer block)
       if (state.dailyBlockedOrigins.has(cleanOrigin)) {
         const count = state.originDailyCounts.get(cleanOrigin) || 0;
-        console.log(`🚦 Rate limited: Origin ${cleanOrigin} exceeded daily limit (${count}/${originRateLimitPerDay})`);
+        // Logged by the request handler in proxy.js (🚫) to avoid duplicate messages
+        // console.log(`🚦 Rate limited: Origin ${cleanOrigin} exceeded daily limit (${count}/${originRateLimitPerDay})`);
         return {
           limited: true,
           reason: `Origin ${cleanOrigin} has exceeded daily rate limit (${count}/${originRateLimitPerDay} requests/day)`,
@@ -515,7 +516,8 @@ function checkRateLimit(ip, origin) {
       // Check HOURLY limit (sliding window)
       if (state.blockedOrigins.has(cleanOrigin)) {
         const count = state.originEffective.get(cleanOrigin) || 0;
-        console.log(`🚦 Rate limited: Origin ${cleanOrigin} exceeded hourly limit (~${count}/${originRateLimitPerHour})`);
+        // Logged by the request handler in proxy.js (🚫) to avoid duplicate messages
+        // console.log(`🚦 Rate limited: Origin ${cleanOrigin} exceeded hourly limit (~${count}/${originRateLimitPerHour})`);
         return {
           limited: true,
           reason: `Origin ${cleanOrigin} has exceeded hourly rate limit (~${count}/${originRateLimitPerHour} requests/hour)`,
@@ -528,7 +530,8 @@ function checkRateLimit(ip, origin) {
       // Check DAILY limit first (longer block)
       if (state.dailyBlockedIPs.has(ip)) {
         const count = state.ipDailyCounts.get(ip) || 0;
-        console.log(`🚦 Rate limited: IP ${ip} exceeded daily limit (${count}/${ipRateLimitPerDay})`);
+        // Logged by the request handler in proxy.js (🚫) to avoid duplicate messages
+        // console.log(`🚦 Rate limited: IP ${ip} exceeded daily limit (${count}/${ipRateLimitPerDay})`);
         return {
           limited: true,
           reason: `IP ${ip} has exceeded daily rate limit for non-origin requests (${count}/${ipRateLimitPerDay} requests/day)`,
@@ -539,7 +542,8 @@ function checkRateLimit(ip, origin) {
       // Check HOURLY limit (sliding window)
       if (state.blockedIPs.has(ip)) {
         const count = state.ipEffective.get(ip) || 0;
-        console.log(`🚦 Rate limited: IP ${ip} exceeded hourly limit (~${count}/${ipRateLimitPerHour})`);
+        // Logged by the request handler in proxy.js (🚫) to avoid duplicate messages
+        // console.log(`🚦 Rate limited: IP ${ip} exceeded hourly limit (~${count}/${ipRateLimitPerHour})`);
         return {
           limited: true,
           reason: `IP ${ip} has exceeded hourly rate limit for non-origin requests (~${count}/${ipRateLimitPerHour} requests/hour)`,
