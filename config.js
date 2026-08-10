@@ -2,6 +2,16 @@ const usdcAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 // const rpcFunderContractAddress = "0x291469065a4DDdE2CA9f6A53ab4Aa148B8e42f48";
 const backgroundTasksInterval = 10; //seconds
 
+// Firebase holds the donation ledger behind rpc.buidlguidl.com (funded balances and
+// the displayed request totals). Nothing in the request path reads it, so writes can
+// be off without affecting RPC serving or rate limiting.
+//
+// Disabled: urlList is a single document with one field per origin, and the flood of
+// junk origins pushed it past Firestore's per-document index entry cap, so every write
+// fails. Re-enabling requires re-modelling urlList as a subcollection and filtering
+// origins before writing, or the same limit will be hit again.
+const firebaseUpdatesEnabled = false;
+
 // =============================================================================
 // RATE LIMITING CONFIGURATION
 // =============================================================================
@@ -57,6 +67,7 @@ export {
   usdcAddress,
   // rpcFunderContractAddress,
   backgroundTasksInterval,
+  firebaseUpdatesEnabled,
   originRateLimitPerHour,
   ipRateLimitPerHour,
   originRateLimitPerDay,

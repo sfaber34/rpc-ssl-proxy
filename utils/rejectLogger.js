@@ -24,22 +24,6 @@ const FLUSH_INTERVAL_MS = 1000; // Flush every second if there are pending write
 const MAX_BUFFER_SIZE = 100;    // Flush immediately if buffer gets this big
 
 /**
- * Safely get a string header value from request
- */
-function getHeaderString(req, headerName) {
-  try {
-    const value = req?.headers?.[headerName];
-    if (!value) return null;
-    if (Array.isArray(value)) {
-      return typeof value[0] === 'string' ? value[0] : null;
-    }
-    return typeof value === 'string' ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Normalize IPv4-mapped IPv6 addresses
  */
 function normalizeIP(ip) {
@@ -56,30 +40,14 @@ function normalizeIP(ip) {
 
 /**
  * Safely extract client IP from request
+ *
+ * Must stay in sync with getClientIP in proxy.js: if the log records a different
+ * identity than the rate limiter enforces on, rejected-request triage is misleading.
+ * Forwarding headers are ignored for the reasons documented there.
  */
 function getClientIP(req) {
   try {
-    // Check common proxy headers in priority order
-    const cfIp = getHeaderString(req, 'cf-connecting-ip');
-    if (cfIp) return normalizeIP(cfIp.trim());
-    
-    const trueClientIp = getHeaderString(req, 'true-client-ip');
-    if (trueClientIp) return normalizeIP(trueClientIp.trim());
-    
-    const forwarded = getHeaderString(req, 'x-forwarded-for');
-    if (forwarded) {
-      const ips = forwarded.split(',').map(ip => ip.trim());
-      return normalizeIP(ips[0]);
-    }
-    
-    const realIp = getHeaderString(req, 'x-real-ip');
-    if (realIp) return normalizeIP(realIp.trim());
-    
-    const fastlyIp = getHeaderString(req, 'fastly-client-ip');
-    if (fastlyIp) return normalizeIP(fastlyIp.trim());
-    
-    const directIP = req?.ip || req?.connection?.remoteAddress || req?.socket?.remoteAddress;
-    return normalizeIP(directIP || 'unknown');
+    return normalizeIP(req?.ip || req?.socket?.remoteAddress || 'unknown');
   } catch {
     return 'unknown';
   }

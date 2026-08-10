@@ -2,7 +2,7 @@ import { updateFirebaseWithNewRequests } from './updateFirebaseWithNewRequests.j
 import { updateRDSWithIpRequests } from './updateRDSWithIpRequests.js';
 import { transferFirebaseRequestsToFunded } from './transferFirebaseRequestsToFunded.js';
 import { normalizeOrigin } from './originValidator.js';
-import { backgroundTasksInterval } from '../config.js';
+import { backgroundTasksInterval, firebaseUpdatesEnabled } from '../config.js';
 
 // Shared state object
 const state = {
@@ -113,6 +113,30 @@ function updateIpCountMap(ip, origin, count = 1) {
   }
 }
 
+// Merge counts back into the live maps so a failed write is retried next cycle.
+// Only ever called for the map whose own write failed: the RDS write is additive
+// (requests_last_hour = requests_last_hour + EXCLUDED...), so restoring counts it
+// already committed re-sends them and compounds every counter it feeds.
+function restoreUrlCounts(urlCounts) {
+  for (const url in urlCounts) {
+    state.urlCountMap[url] = (state.urlCountMap[url] || 0) + urlCounts[url];
+  }
+}
+
+function restoreIpCounts(ipCounts) {
+  for (const ip in ipCounts) {
+    if (!state.ipCountMap[ip]) {
+      state.ipCountMap[ip] = ipCounts[ip];
+      continue;
+    }
+    state.ipCountMap[ip].count += ipCounts[ip].count;
+    for (const origin in ipCounts[ip].origins) {
+      state.ipCountMap[ip].origins[origin] =
+        (state.ipCountMap[ip].origins[origin] || 0) + ipCounts[ip].origins[origin];
+    }
+  }
+}
+
 // Function to process all background tasks
 async function processBackgroundTasks() {
   if (state.isProcessing) {
@@ -131,48 +155,43 @@ async function processBackgroundTasks() {
     state.urlCountMap = {};
     state.ipCountMap = {};
     
-    // Process updates in parallel: Firebase for domains, RDS for IPs
-    try {
-      await Promise.all([
-        updateFirebaseWithNewRequests(currentUrlCountMap),
-        updateRDSWithIpRequests(currentIpCountMap)
-      ]);
-      
-      // Increment counter only on success
-      state.updateCounter++;
-      
-      // Every 10th update, process transfers
-      if (state.updateCounter >= 10) {
-        console.log('Running transfers after Firebase update...');
+    // RDS carries IP counts for rate limiting, Firebase carries the donation ledger.
+    // Settle them independently so a failure in one never restores the other's data.
+    const [ipWrite, ledgerWrite] = await Promise.allSettled([
+      updateRDSWithIpRequests(currentIpCountMap),
+      firebaseUpdatesEnabled
+        ? updateFirebaseWithNewRequests(currentUrlCountMap)
+        : Promise.resolve()
+    ]);
+
+    if (ipWrite.status === 'rejected') {
+      console.error('❌ RDS update failed, restoring IP counts to retry next cycle:', ipWrite.reason);
+      restoreIpCounts(currentIpCountMap);
+    }
+
+    if (ledgerWrite.status === 'rejected') {
+      console.error('❌ Firebase update failed, restoring URL counts to retry next cycle:', ledgerWrite.reason);
+      restoreUrlCounts(currentUrlCountMap);
+    }
+
+    if (ipWrite.status === 'rejected' || ledgerWrite.status === 'rejected') {
+      console.log('📦 Failed data restored. Will retry in next background task cycle.');
+      return;
+    }
+
+    state.updateCounter++;
+
+    // Every 10th update, process transfers. Counter resets before the attempt so a
+    // failing transfer retries on the normal cadence instead of every cycle, and
+    // cannot reach the restore paths above.
+    if (firebaseUpdatesEnabled && state.updateCounter >= 10) {
+      state.updateCounter = 0;
+      console.log('Running transfers after Firebase update...');
+      try {
         await transferFirebaseRequestsToFunded();
-        state.updateCounter = 0;
+      } catch (transferError) {
+        console.error('⚠️  Firebase transfer failed (non-fatal, no counts affected):', transferError);
       }
-    } catch (dbError) {
-      console.error('❌ Database update failed, restoring data to retry next cycle:', dbError);
-      
-      // Restore data by merging back into the maps for next attempt
-      // Merge URL counts
-      for (const url in currentUrlCountMap) {
-        state.urlCountMap[url] = (state.urlCountMap[url] || 0) + currentUrlCountMap[url];
-      }
-      
-      // Merge IP counts
-      for (const ip in currentIpCountMap) {
-        if (!state.ipCountMap[ip]) {
-          state.ipCountMap[ip] = currentIpCountMap[ip];
-        } else {
-          state.ipCountMap[ip].count += currentIpCountMap[ip].count;
-          // Merge origins
-          for (const origin in currentIpCountMap[ip].origins) {
-            if (!state.ipCountMap[ip].origins[origin]) {
-              state.ipCountMap[ip].origins[origin] = 0;
-            }
-            state.ipCountMap[ip].origins[origin] += currentIpCountMap[ip].origins[origin];
-          }
-        }
-      }
-      
-      console.log('📦 Data restored. Will retry in next background task cycle.');
     }
   } catch (error) {
     console.error('Error in background tasks:', error);

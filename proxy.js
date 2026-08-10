@@ -21,9 +21,10 @@ https.globalAgent.options.ca = sslRootCas.create();
 dotenv.config();
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = 0;
 
-// Trust proxy - enables Express to properly read proxy headers
-// Set to true if behind a single proxy, or set to number of proxy hops
-app.set('trust proxy', true);
+// Nothing sits in front of this service, so forwarding headers are caller-supplied
+// and unverifiable. Keeping this false makes req.ip the address observed on the socket.
+// If a CDN or load balancer is added later, set this to that proxy's CIDR ranges.
+app.set('trust proxy', false);
 
 const targetUrl = process.env.TARGET_URL;
 const fallbackUrl = process.env.FALLBACK_URL;
@@ -68,64 +69,14 @@ function normalizeIP(ip) {
   return ip;
 }
 
-// Helper function to safely get string header value
-function getHeaderString(req, headerName) {
-  const value = req.headers[headerName];
-  if (!value) return null;
-  // Handle array headers (take first value)
-  if (Array.isArray(value)) {
-    return typeof value[0] === 'string' ? value[0] : null;
-  }
-  // Ensure it's a string
-  return typeof value === 'string' ? value : null;
-}
-
 // Helper function to safely extract client IP
+// Deliberately ignores X-Forwarded-For and CDN headers: a peer must complete a TCP
+// and TLS handshake to reach this code, so the socket address cannot be forged,
+// while those headers are free-form caller input. Rate limit counters are only
+// meaningful when keyed on an identity the caller cannot mint at will.
 function getClientIP(req) {
   try {
-    // Priority order for proxy headers (most reliable first):
-    
-    // 1. Cloudflare - CF-Connecting-IP (most reliable when behind Cloudflare)
-    const cfIp = getHeaderString(req, 'cf-connecting-ip');
-    if (cfIp) {
-      return normalizeIP(cfIp.trim());
-    }
-    
-    // 2. Akamai - True-Client-IP
-    const trueClientIp = getHeaderString(req, 'true-client-ip');
-    if (trueClientIp) {
-      return normalizeIP(trueClientIp.trim());
-    }
-    
-    // 3. AWS ELB/ALB - X-Forwarded-For (when behind AWS load balancer)
-    // Also used by many other proxies/load balancers
-    const forwarded = getHeaderString(req, 'x-forwarded-for');
-    if (forwarded) {
-      // X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
-      // The FIRST IP is the original client
-      const ips = forwarded.split(',').map(ip => ip.trim());
-      return normalizeIP(ips[0]);
-    }
-    
-    // 4. Nginx and other proxies - X-Real-IP
-    const realIp = getHeaderString(req, 'x-real-ip');
-    if (realIp) {
-      return normalizeIP(realIp.trim());
-    }
-    
-    // 5. Fastly CDN - Fastly-Client-IP
-    const fastlyIp = getHeaderString(req, 'fastly-client-ip');
-    if (fastlyIp) {
-      return normalizeIP(fastlyIp.trim());
-    }
-    
-    // 6. Fall back to direct connection IP (when not behind a proxy)
-    // With 'trust proxy' enabled, req.ip will use X-Forwarded-For automatically
-    const directIP = req.ip || 
-                     req.connection?.remoteAddress || 
-                     req.socket?.remoteAddress;
-    
-    return normalizeIP(directIP || 'unknown');
+    return normalizeIP(req.ip || req.socket?.remoteAddress || 'unknown');
   } catch (error) {
     // If anything goes wrong, return 'unknown' to avoid breaking the application
     console.error('Error extracting client IP:', error);
