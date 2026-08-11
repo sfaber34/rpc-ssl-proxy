@@ -14,6 +14,7 @@ import { checkRateLimit, buildRateLimitResponse, getRateLimitStatus, startRateLi
 import { validateRpcRequest } from './utils/requestValidator.js';
 import { isIPBlacklisted, startWatchingBlacklist, getBlacklistStatus } from './utils/ipBlacklist.js';
 import { requireAdminKey } from './utils/adminAuth.js';
+import { redactUrl } from './utils/redactUrl.js';
 import { defaultRequestCount, methodRequestCounts } from './config.js';
 
 var app = express();
@@ -426,9 +427,9 @@ app.get("/proxy", (req, res) => {
     res.send(
       "<html><body><div style='padding:20px;font-size:18px'>" +
       "<H1>PROXY TO:</H1>" +
-      "<div><strong>Primary:</strong> " + targetUrl + "</div>" +
-      "<div><strong>Fallback:</strong> " + fallbackUrl + "</div>" +
-      "<div><strong>Current:</strong> " + status.currentUrl + "</div>" +
+      "<div><strong>Primary:</strong> " + redactUrl(targetUrl) + "</div>" +
+      "<div><strong>Fallback:</strong> " + redactUrl(fallbackUrl) + "</div>" +
+      "<div><strong>Current:</strong> " + redactUrl(status.currentUrl) + "</div>" +
       "<div><strong>Status:</strong> " + status.state + "</div>" +
       "<div><strong>Using Fallback:</strong> " + status.isUsingFallback + "</div>" +
       "<div><strong>Consecutive Failures:</strong> " + status.consecutiveFailures + "</div>" +
@@ -516,10 +517,13 @@ app.get("/status", (req, res) => {
   try {
     const status = circuitBreaker.getStatus();
     res.json({
-      circuitBreaker: status,
+      circuitBreaker: {
+        ...status,
+        currentUrl: redactUrl(status.currentUrl)
+      },
       urls: {
-        primary: targetUrl,
-        fallback: fallbackUrl
+        primary: redactUrl(targetUrl),
+        fallback: redactUrl(fallbackUrl)
       },
       timestamp: new Date().toISOString()
     });
